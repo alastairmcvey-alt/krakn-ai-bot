@@ -296,18 +296,20 @@ async function runAdvisor() {
 
     const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
 
-    const prompt = `You are an expert crypto trading advisor for an Australian retail investor. All prices are in AUD.
+    const prompt = `You are an expert crypto trading advisor for an Australian retail investor.
 
-MARKET DATA:
+IMPORTANT: All prices below are ALREADY in Australian Dollars (AUD) — they come directly from Kraken's AUD trading pairs. Do NOT convert from USD. Do NOT mention currency differences or that prices "seem high compared to USD". Just analyse the AUD prices as-is and give trading advice.
+
+CURRENT AUD MARKET DATA:
 ${marketSummary}
 ${balanceContext}
 ${newsContext ? `\nLATEST NEWS:\n${newsContext}` : ''}
 
-Give clear actionable trading advice. For each coin provide:
+Give clear actionable trading advice. For each coin:
 - BUY / SELL / HOLD recommendation
 - Confidence %
-- One sentence reason
-- If BUY/SELL and balance is known: suggest a specific dollar amount to trade
+- One sentence reason focused on technicals and market conditions — no mention of currency conversion
+- If BUY/SELL and balance is known: suggest a specific AUD dollar amount to trade
 
 Format EXACTLY like this:
 🤖 <b>KRAKN·AI Market Update</b>
@@ -464,15 +466,19 @@ app.post('/api/ai/signal', requireAuth, async (req, res) => {
       ? `\nThe investor currently has $${parseFloat(balanceAUD).toFixed(2)} AUD available to trade.`
       : '';
 
-    const prompt = `You are a crypto trading AI for an Australian retail investor. All prices in AUD.
+    const prompt = `You are a crypto trading AI for an Australian retail investor.
+
+IMPORTANT: These prices are ALREADY in Australian Dollars (AUD) — they come directly from the Kraken AUD trading pairs (e.g. XBTAUD, ETHAUD). Do NOT convert from USD. Do NOT mention any price difference or conversion. Just use these AUD prices as-is.
 
 Analyse ${displayPair} at $${parseFloat(price).toFixed(2)} AUD (${change24h > 0 ? '+' : ''}${change24h}% 24h, RSI: ${rsi}).${balanceNote}
+
+Give a clear buy/sell/hold recommendation. Your reason should be concise, beginner-friendly, and focused on the technical signal and market conditions — do NOT mention currency conversion or price differences between AUD and USD.
 
 Return ONLY this JSON (no markdown, no extra text):
 {
   "action": "BUY",
   "confidence": 72,
-  "reason": "Brief 1-2 sentence beginner-friendly reason",
+  "reason": "Brief 1-2 sentence beginner-friendly reason focused on technicals and market conditions only",
   "support": 150000,
   "resistance": 165000,
   "risk": "Medium",
@@ -484,7 +490,7 @@ Return ONLY this JSON (no markdown, no extra text):
   "suggestedPct": ${balanceAUD && balanceAUD > 0 ? 'suggested percentage of balance as a number e.g. 25' : 'null'}
 }
 
-For suggestedAmountAUD: be conservative, suggest 10-30% of available balance for medium confidence, up to 40% for high confidence BUY signals. Never suggest more than 50% of balance on a single trade. Return null if no balance provided or action is HOLD.`;
+For suggestedAmountAUD: be conservative. Suggest 10-30% of available balance for medium confidence, up to 40% for high confidence BUY signals. Never suggest more than 50% on a single trade. Return null if no balance provided or action is HOLD.`;
 
     const text   = await callClaude(prompt, 400);
     const clean  = text.replace(/```json|```/g, '').trim();
