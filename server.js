@@ -592,4 +592,5 @@ Return ONLY this JSON (no markdown):
     res.status(500).json({ error: err.message });
   }
 });
+
 module.exports = app;
