@@ -291,8 +291,14 @@ app.post('/api/ai/signal', requireAuth, async (req, res) => {
 
     const data = await response.json();
 
+    // Log full response so we can debug
+    console.log('[AI RESPONSE STATUS]', response.status);
+    console.log('[AI RESPONSE BODY]', JSON.stringify(data));
+
     if (!data.content || !data.content.length) {
-      return res.status(500).json({ error: 'Empty response from AI' });
+      const errMsg = data.error?.message || data.error?.type || JSON.stringify(data);
+      console.error('[AI SIGNAL] No content in response:', errMsg);
+      return res.status(500).json({ error: 'AI error: ' + errMsg });
     }
 
     const text = data.content.map(i => i.text || '').join('');
