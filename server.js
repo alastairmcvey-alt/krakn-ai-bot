@@ -557,4 +557,39 @@ Return ONLY this JSON (no markdown):
     res.status(500).json({ error: err.message });
   }
 });
+// ─── AI Signal Endpoint ────────────────────────────────────────
+app.post('/api/ai/signal', requireAuth, async (req, res) => {
+  try {
+    const { pair, price, change24h } = req.body;
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(400).json({ error: 'ANTHROPIC_API_KEY not configured' });
+    }
+
+    const prompt = `You are a crypto trading AI. Analyse ${pair} at $${parseFloat(price).toFixed(2)} (${change24h > 0 ? '+' : ''}${change24h}% 24h).
+Return ONLY this JSON (no markdown):
+{"action":"BUY","confidence":72,"reason":"Brief beginner-friendly reason","support":65000,"resistance":72000,"risk":"Medium","rsi":54,"rsi_signal":"Neutral","macd":"Bullish","trend":"Uptrend"}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const data = await response.json();
+    const text = data.content.map(i => i.text || '').join('');
+    const clean = text.replace(/```json|```/g, '').trim();
+    const signal = JSON.parse(clean);
+    res.json({ success: true, data: signal });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 module.exports = app;
