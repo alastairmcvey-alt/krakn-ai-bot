@@ -24,8 +24,8 @@ app.use(cors({
 }));
 
 // ─── Kraken API Config ─────────────────────────────────────────
-const KRAKEN_API_KEY    = process.env.KRAKEN_API_KEY    || '';
-const KRAKEN_API_SECRET = process.env.KRAKEN_API_SECRET || '';
+const KRAKEN_API_KEY    = (process.env.KRAKEN_API_KEY    || '').trim().replace(/[\r\n]/g, '');
+const KRAKEN_API_SECRET = (process.env.KRAKEN_API_SECRET || '').trim().replace(/[\r\n]/g, '');
 const KRAKEN_HOST       = 'api.kraken.com';
 
 // ─── Kraken Signature (Required for private endpoints) ────────
@@ -56,7 +56,7 @@ function krakenPrivateRequest(endpoint, params = {}) {
       path: urlPath,
       method: 'POST',
       headers: {
-        'API-Key': KRAKEN_API_KEY,
+        'API-Key': KRAKEN_API_KEY.trim().replace(/[\r\n]/g, ''),
         'API-Sign': signature,
         'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(postData),
