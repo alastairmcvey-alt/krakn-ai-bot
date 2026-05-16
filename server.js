@@ -1,5 +1,5 @@
 /**
- * KRAKN·AI — Trading Bot Backend Server
+ * KRAKN·AI — Trading Bot Backend Server v2.2
  * =======================================
  * Securely signs and forwards trading requests to Kraken API.
  * Run this on your server/computer — NEVER expose this file publicly.
@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3001;
 // ─── Middleware ────────────────────────────────────────────────
 app.use(express.json());
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*', // Set to your frontend URL in production
+  origin: process.env.FRONTEND_URL || '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -60,7 +60,7 @@ function krakenPrivateRequest(endpoint, params = {}) {
         'API-Sign': signature,
         'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(postData),
-        'User-Agent': 'KRAKN-AI-Bot/2.1'
+        'User-Agent': 'KRAKN-AI-Bot/2.2'
       }
     };
 
@@ -98,7 +98,7 @@ function krakenPublicRequest(endpoint, params = {}) {
       port: 443,
       path,
       method: 'GET',
-      headers: { 'User-Agent': 'KRAKN-AI-Bot/2.1' }
+      headers: { 'User-Agent': 'KRAKN-AI-Bot/2.2' }
     };
 
     const req = https.request(options, (res) => {
@@ -149,8 +149,9 @@ function requireKeys(req, res, next) {
 app.get('/health', (req, res) => {
   res.json({
     status: 'online',
-    version: '2.1',
+    version: '2.2',
     keysConfigured: !!(KRAKEN_API_KEY && KRAKEN_API_SECRET),
+    aiConfigured: !!(process.env.ANTHROPIC_API_KEY),
     timestamp: new Date().toISOString()
   });
 });
@@ -160,18 +161,17 @@ app.get('/api/ticker', async (req, res) => {
   try {
     const pairs = req.query.pairs || 'XBTUSD,ETHUSD,SOLUSD,XRPUSD,ADAUSD';
     const result = await krakenPublicRequest('Ticker', { pair: pairs });
-    
-    // Normalise the response
+
     const tickers = {};
     for (const [krakenPair, data] of Object.entries(result)) {
       tickers[krakenPair] = {
-        price: parseFloat(data.c[0]),       // last trade price
-        bid:   parseFloat(data.b[0]),
-        ask:   parseFloat(data.a[0]),
-        high:  parseFloat(data.h[1]),       // 24h high
-        low:   parseFloat(data.l[1]),       // 24h low
-        volume: parseFloat(data.v[1]),      // 24h volume
-        open:  parseFloat(data.o),
+        price:    parseFloat(data.c[0]),
+        bid:      parseFloat(data.b[0]),
+        ask:      parseFloat(data.a[0]),
+        high:     parseFloat(data.h[1]),
+        low:      parseFloat(data.l[1]),
+        volume:   parseFloat(data.v[1]),
+        open:     parseFloat(data.o),
         change24h: (((parseFloat(data.c[0]) - parseFloat(data.o)) / parseFloat(data.o)) * 100).toFixed(2)
       };
     }
@@ -213,7 +213,6 @@ app.get('/api/orderbook', async (req, res) => {
 app.get('/api/balance', requireAuth, requireKeys, async (req, res) => {
   try {
     const result = await krakenPrivateRequest('Balance');
-    // Convert to readable format
     const balances = {};
     for (const [asset, amount] of Object.entries(result)) {
       const val = parseFloat(amount);
@@ -245,7 +244,7 @@ app.get('/api/orders/closed', requireAuth, requireKeys, async (req, res) => {
   }
 });
 
-// Get open positions (futures/margin)
+// Get open positions
 app.get('/api/positions', requireAuth, requireKeys, async (req, res) => {
   try {
     const result = await krakenPrivateRequest('OpenPositions');
@@ -265,29 +264,60 @@ app.get('/api/trades', requireAuth, requireKeys, async (req, res) => {
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-// PLACE ORDER  ← The core trading endpoint
-// ──────────────────────────────────────────────────────────────
+// ─── AI Signal Endpoint ────────────────────────────────────────
+app.post('/api/ai/signal', requireAuth, async (req, res) => {
+  try {
+    const { pair, price, change24h } = req.body;
+
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(400).json({ error: 'ANTHROPIC_API_KEY not configured on server' });
+    }
+
+    const prompt = `You are a crypto trading AI. Analyse ${pair} at $${parseFloat(price).toFixed(2)} (${change24h > 0 ? '+' : ''}${change24h}% 24h). Return ONLY this JSON (no markdown, no extra text): {"action":"BUY","confidence":72,"reason":"Brief beginner-friendly reason","support":65000,"resistance":72000,"risk":"Medium","rsi":54,"rsi_signal":"Neutral","macd":"Bullish","trend":"Uptrend"}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const data = await response.json();
+
+    if (!data.content || !data.content.length) {
+      return res.status(500).json({ error: 'Empty response from AI' });
+    }
+
+    const text = data.content.map(i => i.text || '').join('');
+    const clean = text.replace(/```json|```/g, '').trim();
+    const signal = JSON.parse(clean);
+
+    res.json({ success: true, data: signal });
+
+  } catch (err) {
+    console.error('[AI SIGNAL ERROR]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Place Order ───────────────────────────────────────────────
 app.post('/api/order/place', requireAuth, requireKeys, async (req, res) => {
   try {
-    const {
-      pair,         // e.g. "XBTUSD"
-      type,         // "buy" or "sell"
-      ordertype,    // "market", "limit", "stop-loss"
-      volume,       // amount in base currency
-      price,        // limit price (required for limit orders)
-      leverage,     // e.g. "5:1" for futures (optional)
-      validate      // true = dry run, don't actually place
-    } = req.body;
+    const { pair, type, ordertype, volume, price, leverage, validate } = req.body;
 
-    // Validate required fields
     if (!pair || !type || !ordertype || !volume) {
       return res.status(400).json({
         error: 'Missing required fields: pair, type, ordertype, volume'
       });
     }
 
-    // Sanity checks
     if (!['buy', 'sell'].includes(type)) {
       return res.status(400).json({ error: 'type must be "buy" or "sell"' });
     }
@@ -298,21 +328,14 @@ app.post('/api/order/place', requireAuth, requireKeys, async (req, res) => {
       return res.status(400).json({ error: 'price required for limit orders' });
     }
 
-    const params = {
-      pair,
-      type,
-      ordertype,
-      volume: String(volume),
-    };
-
+    const params = { pair, type, ordertype, volume: String(volume) };
     if (price)    params.price    = String(price);
     if (leverage) params.leverage = String(leverage);
-    if (validate) params.validate = true; // Test without placing
+    if (validate) params.validate = true;
 
     console.log(`[ORDER] ${type.toUpperCase()} ${volume} ${pair} @ ${ordertype}${price ? ' $'+price : ''}${leverage ? ' x'+leverage : ''}`);
 
     const result = await krakenPrivateRequest('AddOrder', params);
-
     console.log(`[ORDER PLACED] txid: ${result.txid?.join(', ')}`);
 
     res.json({
@@ -334,7 +357,6 @@ app.post('/api/order/cancel', requireAuth, requireKeys, async (req, res) => {
   try {
     const { txid } = req.body;
     if (!txid) return res.status(400).json({ error: 'txid required' });
-
     const result = await krakenPrivateRequest('CancelOrder', { txid });
     res.json({ success: true, data: result });
   } catch (err) {
@@ -352,25 +374,25 @@ app.post('/api/order/cancel-all', requireAuth, requireKeys, async (req, res) => 
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-// BOT AUTO-TRADING  ← AI signal → automatic order
-// ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// BOT AUTO-TRADING
+// ══════════════════════════════════════════════════════════════
 let botConfig = {
-  enabled:      false,
-  riskLevel:    'conservative',  // conservative | moderate | aggressive
-  maxTradeUSD:  100,
+  enabled:       false,
+  riskLevel:     'conservative',
+  maxTradeUSD:   100,
   takeProfitPct: 5,
   stopLossPct:   3,
-  pairs:        ['XBTUSD'],
-  confidenceMin: 75,             // Only trade if AI confidence >= this
+  pairs:         ['XBTUSD'],
+  confidenceMin: 75,
 };
 
 let botState = {
-  running:      false,
-  lastSignal:   null,
-  lastTrade:    null,
-  tradesCount:  0,
-  profitUSD:    0,
+  running:     false,
+  lastSignal:  null,
+  lastTrade:   null,
+  tradesCount: 0,
+  profitUSD:   0,
 };
 
 app.get('/api/bot/config', requireAuth, (req, res) => {
@@ -410,52 +432,37 @@ async function startBotLoop() {
     } catch (err) {
       console.error('[BOT ERROR]', err.message);
     }
-    // Wait 60 seconds between checks
     await sleep(60000);
   }
 }
 
 async function runBotForPair(pair) {
-  // 1. Get current price
   const tickerResult = await krakenPublicRequest('Ticker', { pair });
   const key = Object.keys(tickerResult)[0];
   const price = parseFloat(tickerResult[key].c[0]);
   const open  = parseFloat(tickerResult[key].o);
   const change24h = ((price - open) / open * 100).toFixed(2);
 
-  // 2. Get simple technical signal (RSI-like based on recent candles)
   const signal = await computeSignal(pair, price, parseFloat(change24h));
   botState.lastSignal = { pair, signal, price, timestamp: new Date().toISOString() };
 
   console.log(`[BOT] ${pair} price=$${price} signal=${signal.action} confidence=${signal.confidence}%`);
 
-  // 3. Only trade if confidence is high enough
   if (signal.confidence < botConfig.confidenceMin) {
     console.log(`[BOT] Skipping — confidence ${signal.confidence}% < min ${botConfig.confidenceMin}%`);
     return;
   }
 
-  // 4. Calculate volume from maxTradeUSD
   const volume = (botConfig.maxTradeUSD / price).toFixed(8);
 
-  // 5. Place the order
   if (signal.action === 'BUY' || signal.action === 'SELL') {
     const type = signal.action.toLowerCase();
     try {
       const order = await krakenPrivateRequest('AddOrder', {
-        pair,
-        type,
-        ordertype: 'market',
-        volume,
+        pair, type, ordertype: 'market', volume,
       });
-
-      botState.lastTrade = {
-        pair, type, volume, price,
-        txid: order.txid,
-        timestamp: new Date().toISOString()
-      };
+      botState.lastTrade = { pair, type, volume, price, txid: order.txid, timestamp: new Date().toISOString() };
       botState.tradesCount++;
-
       console.log(`[BOT] ✅ Placed ${type.toUpperCase()} ${volume} ${pair} — txid: ${order.txid?.join(',')}`);
     } catch (err) {
       console.error(`[BOT] Order failed: ${err.message}`);
@@ -463,12 +470,11 @@ async function runBotForPair(pair) {
   }
 }
 
-// Simple technical signal: RSI approximation from OHLC
 async function computeSignal(pair, currentPrice, change24h) {
   try {
     const ohlcResult = await krakenPublicRequest('OHLC', { pair, interval: 60 });
     const key = Object.keys(ohlcResult).find(k => k !== 'last');
-    const candles = ohlcResult[key].slice(-14); // Last 14 candles for RSI
+    const candles = ohlcResult[key].slice(-14);
 
     const closes = candles.map(c => parseFloat(c[4]));
     const gains = [], losses = [];
@@ -499,7 +505,6 @@ async function computeSignal(pair, currentPrice, change24h) {
       confidence = 55 + Math.abs(change24h);
     }
 
-    // Conservative = higher threshold needed
     if (botConfig.riskLevel === 'conservative') confidence *= 0.85;
     if (botConfig.riskLevel === 'aggressive')   confidence *= 1.10;
 
@@ -515,82 +520,13 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 app.listen(PORT, () => {
   console.log('');
   console.log('╔═══════════════════════════════════════╗');
-  console.log('║        KRAKN·AI Bot Server v2.1       ║');
+  console.log('║        KRAKN·AI Bot Server v2.2       ║');
   console.log('╠═══════════════════════════════════════╣');
   console.log(`║  Running on http://localhost:${PORT}      ║`);
   console.log(`║  Keys configured: ${!!(KRAKEN_API_KEY && KRAKEN_API_SECRET) ? '✅ YES          ║' : '❌ NO — check .env║'}`);
+  console.log(`║  AI configured:   ${!!(process.env.ANTHROPIC_API_KEY) ? '✅ YES          ║' : '❌ NO — check .env║'}`);
   console.log('╚═══════════════════════════════════════╝');
   console.log('');
-});
-// ─── AI Signal Endpoint ────────────────────────────────────────
-app.post('/api/ai/signal', requireAuth, async (req, res) => {
-  try {
-    const { pair, price, change24h } = req.body;
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(400).json({ error: 'ANTHROPIC_API_KEY not configured' });
-    }
-
-    const prompt = `You are a crypto trading AI. Analyse ${pair} at $${parseFloat(price).toFixed(2)} (${change24h > 0 ? '+' : ''}${change24h}% 24h).
-Return ONLY this JSON (no markdown):
-{"action":"BUY","confidence":72,"reason":"Brief beginner-friendly reason","support":65000,"resistance":72000,"risk":"Medium","rsi":54,"rsi_signal":"Neutral","macd":"Bullish","trend":"Uptrend"}`;
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 300,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-
-    const data = await response.json();
-    const text = data.content.map(i => i.text || '').join('');
-    const clean = text.replace(/```json|```/g, '').trim();
-    const signal = JSON.parse(clean);
-    res.json({ success: true, data: signal });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-// ─── AI Signal Endpoint ────────────────────────────────────────
-app.post('/api/ai/signal', requireAuth, async (req, res) => {
-  try {
-    const { pair, price, change24h } = req.body;
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(400).json({ error: 'ANTHROPIC_API_KEY not configured' });
-    }
-
-    const prompt = `You are a crypto trading AI. Analyse ${pair} at $${parseFloat(price).toFixed(2)} (${change24h > 0 ? '+' : ''}${change24h}% 24h).
-Return ONLY this JSON (no markdown):
-{"action":"BUY","confidence":72,"reason":"Brief beginner-friendly reason","support":65000,"resistance":72000,"risk":"Medium","rsi":54,"rsi_signal":"Neutral","macd":"Bullish","trend":"Uptrend"}`;
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 300,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-
-    const data = await response.json();
-    const text = data.content.map(i => i.text || '').join('');
-    const clean = text.replace(/```json|```/g, '').trim();
-    const signal = JSON.parse(clean);
-    res.json({ success: true, data: signal });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 module.exports = app;
