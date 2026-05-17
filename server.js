@@ -1,7 +1,7 @@
 /**
- * KRAKN·AI — Trading Bot Backend Server v2.5
+ * KRAKN·AI — Trading Bot Backend Server v2.6
  * =============================================
- * Fixed AUD ticker, balance-aware AI signals, Telegram advisor
+ * Fixed AUD ticker, balance-aware AI signals, Telegram two-way chat
  */
 
 const express     = require('express');
@@ -661,6 +661,240 @@ async function computeRSI(pair) {
   } catch { return { action:'HOLD', confidence:0, rsi:50 }; }
 }
 
+// ══════════════════════════════════════════════════════════════
+// TELEGRAM TWO-WAY CHAT
+// ══════════════════════════════════════════════════════════════
+
+// Conversation history per chat (keeps context for follow-up questions)
+const chatHistory = {};
+
+// Register webhook with Telegram when server starts
+async function registerTelegramWebhook() {
+  if (!TELEGRAM_TOKEN) return;
+  try {
+    const serverUrl = process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN;
+    if (!serverUrl) { console.log('[TELEGRAM] No public URL found, webhook not registered'); return; }
+    const webhookUrl = `https://${serverUrl}/api/telegram/webhook`;
+    const body = JSON.stringify({ url: webhookUrl });
+    await new Promise((resolve) => {
+      const options = {
+        hostname: 'api.telegram.org',
+        path: `/bot${TELEGRAM_TOKEN}/setWebhook`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      };
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try { const r = JSON.parse(data); console.log('[TELEGRAM] Webhook registered:', r.ok ? '✅' : '❌ ' + r.description); }
+          catch(e) {}
+          resolve();
+        });
+      });
+      req.on('error', () => resolve());
+      req.write(body);
+      req.end();
+    });
+  } catch(e) { console.error('[TELEGRAM WEBHOOK ERROR]', e.message); }
+}
+
+// Send typing indicator to Telegram
+async function sendTyping(chatId) {
+  if (!TELEGRAM_TOKEN) return;
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ chat_id: chatId, action: 'typing' });
+    const options = {
+      hostname: 'api.telegram.org',
+      path: `/bot${TELEGRAM_TOKEN}/sendChatAction`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    };
+    const req = https.request(options, (res) => { res.on('data', ()=>{}); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.write(body);
+    req.end();
+  });
+}
+
+// Send message to a specific chat ID
+async function sendTelegramTo(chatId, message) {
+  if (!TELEGRAM_TOKEN) return;
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' });
+    const options = {
+      hostname: 'api.telegram.org',
+      path: `/bot${TELEGRAM_TOKEN}/sendMessage`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { resolve(null); } });
+    });
+    req.on('error', resolve);
+    req.write(body);
+    req.end();
+  });
+}
+
+// Handle incoming Telegram message with AI
+async function handleTelegramMessage(chatId, userMessage, username) {
+  // Security: only respond to the configured chat ID
+  if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
+    await sendTelegramTo(chatId, '⛔ Unauthorised. This bot is private.');
+    return;
+  }
+
+  console.log(`[TELEGRAM CHAT] ${username}: ${userMessage}`);
+
+  // Show typing indicator
+  await sendTyping(chatId);
+
+  // Handle special commands
+  const msg = userMessage.trim().toLowerCase();
+
+  if (msg === '/start' || msg === 'start') {
+    await sendTelegramTo(chatId,
+      '🤖 <b>KRAKN·AI Assistant</b>\n\n' +
+      'Ask me anything about crypto! For example:\n\n' +
+      '• "How is BTC looking right now?"\n' +
+      '• "Should I buy ETH?"\n' +
+      '• "What\'s my portfolio worth?"\n' +
+      '• "Run market analysis"\n' +
+      '• "What\'s happening in crypto today?"\n' +
+      '• "Is now a good time to sell SOL?"\n\n' +
+      '💡 I have access to live AUD prices and your balance.'
+    );
+    return;
+  }
+
+  if (msg === 'run analysis' || msg === '/analysis' || msg === 'analyse' || msg === 'analyze') {
+    await sendTelegramTo(chatId, '⏳ Running full market analysis... give me 30 seconds!');
+    await runAdvisor();
+    return;
+  }
+
+  // Get live market data to include in context
+  let marketContext = '';
+  try {
+    const marketLines = [];
+    for (const pair of ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD']) {
+      const ticker = await fetchSingleTicker(pair);
+      if (ticker) {
+        const dp = PAIR_DISPLAY[pair] || pair;
+        marketLines.push(`${dp}: $${ticker.price.toLocaleString('en-AU')} AUD (${ticker.change24h > 0 ? '+' : ''}${ticker.change24h}% 24h)`);
+      }
+    }
+    if (marketLines.length) marketContext = '\nCURRENT AUD PRICES:\n' + marketLines.join('\n');
+  } catch(e) {}
+
+  // Get balance context
+  let balanceContext = '';
+  try {
+    if (KRAKEN_API_KEY && KRAKEN_API_SECRET) {
+      const bal    = await krakenPrivateRequest('Balance');
+      const audBal = parseFloat(bal['ZAUD'] || bal['AUD'] || 0);
+      const lines  = [];
+      if (audBal > 0) lines.push(`AUD Cash: $${audBal.toFixed(2)}`);
+      for (const [asset, qty] of Object.entries(bal)) {
+        if (asset === 'ZAUD' || asset === 'AUD') continue;
+        if (parseFloat(qty) > 0.000001) {
+          const sym  = asset.replace(/^X/,'').replace(/Z$/,'').replace('XBT','BTC');
+          const pair = Object.keys(PAIR_DISPLAY).find(p => p.includes(sym === 'BTC' ? 'XBT' : sym));
+          const ticker = pair ? await fetchSingleTicker(pair) : null;
+          const val    = ticker ? (parseFloat(qty) * ticker.price).toFixed(2) : '?';
+          lines.push(`${sym}: ${parseFloat(qty).toFixed(6)} (≈ $${val} AUD)`);
+        }
+      }
+      if (lines.length) balanceContext = '\nYOUR PORTFOLIO:\n' + lines.join('\n');
+    }
+  } catch(e) {}
+
+  const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
+
+  // Build conversation history (keep last 6 messages for context)
+  if (!chatHistory[chatId]) chatHistory[chatId] = [];
+  chatHistory[chatId].push({ role: 'user', content: userMessage });
+  if (chatHistory[chatId].length > 12) chatHistory[chatId] = chatHistory[chatId].slice(-12);
+
+  const systemPrompt = `You are KRAKN·AI, a personal cryptocurrency trading assistant for an Australian investor. You are helpful, concise, and speak plainly — no jargon unless asked.
+
+IMPORTANT ABOUT PRICES: All prices are in Australian Dollars (AUD) directly from Kraken's AUD trading pairs. Do NOT convert from USD. Do NOT mention price differences between AUD and USD. Just use these AUD prices as-is.
+${marketContext}
+${balanceContext}
+
+Current time: ${sydneyTime} AEST
+
+Guidelines:
+- Keep responses concise and easy to read in Telegram (use line breaks, emojis for readability)
+- Give clear actionable advice when asked about trading
+- Be honest about uncertainty — crypto is volatile
+- When suggesting trades, be conservative with position sizing
+- You can answer general crypto questions, news questions, strategy questions
+- Format nicely for Telegram using HTML: <b>bold</b> for important things
+- Never give financial advice as a guarantee — always note the risk
+- If asked about a specific coin, check the live price data above first`;
+
+  try {
+    // Keep typing going for longer responses
+    const typingInterval = setInterval(() => sendTyping(chatId), 4000);
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 600,
+        system: systemPrompt,
+        messages: chatHistory[chatId]
+      })
+    });
+
+    clearInterval(typingInterval);
+
+    const data   = await response.json();
+    const reply  = data.content?.map(c => c.text || '').join('') || 'Sorry, I had trouble processing that.';
+
+    // Add assistant reply to history
+    chatHistory[chatId].push({ role: 'assistant', content: reply });
+
+    await sendTelegramTo(chatId, reply);
+    console.log(`[TELEGRAM CHAT] Replied to ${username}`);
+
+  } catch(err) {
+    clearInterval && clearInterval();
+    console.error('[TELEGRAM CHAT ERROR]', err.message);
+    await sendTelegramTo(chatId, '❌ Sorry, I had an error. Try again in a moment.');
+  }
+}
+
+// ─── Telegram Webhook Endpoint ─────────────────────────────────
+app.post('/api/telegram/webhook', async (req, res) => {
+  // Always respond 200 immediately so Telegram doesn't retry
+  res.sendStatus(200);
+
+  try {
+    const update  = req.body;
+    const message = update.message || update.edited_message;
+    if (!message || !message.text) return;
+
+    const chatId   = message.chat.id;
+    const text     = message.text;
+    const username = message.from?.username || message.from?.first_name || 'User';
+
+    // Handle in background so we don't block
+    handleTelegramMessage(chatId, text, username).catch(e => console.error('[WEBHOOK ERROR]', e.message));
+  } catch(e) {
+    console.error('[WEBHOOK PARSE ERROR]', e.message);
+  }
+});
+
 // ─── Start ─────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('');
@@ -674,6 +908,8 @@ app.listen(PORT, () => {
   console.log(`║  Telegram: ${!!(TELEGRAM_TOKEN&&TELEGRAM_CHAT_ID)?'✅':'❌'}                         ║`);
   console.log('╚════════════════════════════════════════╝');
   console.log('');
+  // Register Telegram webhook
+  setTimeout(registerTelegramWebhook, 3000);
 });
 
 module.exports = app;
