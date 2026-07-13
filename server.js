@@ -329,8 +329,83 @@ Only include coins above ${advisorSettings.minConfidence}% confidence. If none q
       await sendTelegram(advice);
       console.log('[ADVISOR] Telegram sent');
     }
+
+    // ── Check for strong BUY opportunities and prompt user ────
+    await checkBuyOpportunities(marketData);
+
   } catch(err) {
     console.error('[ADVISOR ERROR]', err.message);
+  }
+}
+
+// ─── Check for Buy Opportunities ──────────────────────────────
+async function checkBuyOpportunities(marketData) {
+  try {
+    // Get AUD cash balance
+    let audCash = 0;
+    if (KRAKEN_API_KEY && KRAKEN_API_SECRET) {
+      const bal = await krakenPrivateRequest('Balance');
+      audCash   = parseFloat(bal['ZAUD'] || bal['AUD'] || 0);
+    }
+
+    if (audCash < 10) return; // need at least $10 to buy
+
+    // Find strongest BUY signal
+    let bestOpportunity = null;
+    for (const d of marketData) {
+      if (d.rsi < 30) {
+        // Strong oversold signal
+        const confidence = Math.min(95, 60 + (30 - d.rsi) * 2);
+        if (confidence >= advisorSettings.minConfidence) {
+          if (!bestOpportunity || confidence > bestOpportunity.confidence) {
+            bestOpportunity = { ...d, confidence };
+          }
+        }
+      }
+    }
+
+    if (!bestOpportunity) return;
+
+    // Suggest conservative amount — 25% of cash
+    const suggestedAUD = Math.min(audCash * 0.25, audCash - 10);
+    if (suggestedAUD < 10) return;
+
+    const volume = (suggestedAUD / bestOpportunity.price).toFixed(8);
+
+    // Store as pending opportunity
+    pendingBuyOpportunity = {
+      pair:        bestOpportunity.pair,
+      displayPair: bestOpportunity.displayPair,
+      sym:         bestOpportunity.displayPair.replace('/AUD',''),
+      price:       bestOpportunity.price,
+      amountAUD:   suggestedAUD,
+      volume,
+      rsi:         bestOpportunity.rsi,
+      confidence:  bestOpportunity.confidence,
+      timestamp:   Date.now(),
+    };
+
+    const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
+
+    // Send buy prompt to Telegram
+    await sendTelegram(
+      `🟢 <b>BUY OPPORTUNITY DETECTED!</b>\n\n` +
+      `<b>${bestOpportunity.displayPair}</b>\n` +
+      `Price: ${fmtAUDServer(bestOpportunity.price)}\n` +
+      `RSI: ${bestOpportunity.rsi} (Oversold 🔥)\n` +
+      `Confidence: ${bestOpportunity.confidence}%\n` +
+      `24h Change: ${bestOpportunity.change24h > 0 ? '+' : ''}${bestOpportunity.change24h}%\n` +
+      `High: ${fmtAUDServer(bestOpportunity.high)} | Low: ${fmtAUDServer(bestOpportunity.low)}\n\n` +
+      `💰 Suggested: <b>${fmtAUDServer(suggestedAUD)}</b> (25% of your AUD cash)\n` +
+      `= ${volume} ${pendingBuyOpportunity.sym}\n\n` +
+      `Reply <b>YES</b> to buy now or <b>NO</b> to skip.\n` +
+      `⏰ Expires in 10 minutes — ${sydneyTime} AEST`
+    );
+
+    console.log(`[BUY OPPORTUNITY] ${bestOpportunity.displayPair} RSI:${bestOpportunity.rsi} — prompt sent`);
+
+  } catch(e) {
+    console.error('[BUY OPPORTUNITY ERROR]', e.message);
   }
 }
 
@@ -595,77 +670,246 @@ app.post('/api/order/cancel-all', requireAuth, requireKeys, async (req, res) => 
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ─── Bot ───────────────────────────────────────────────────────
-let botConfig = { riskLevel:'conservative', maxTradeAUD:150, confidenceMin:75, pairs:['XBTAUD'] };
-let botState  = { running:false, lastSignal:null, lastTrade:null, tradesCount:0 };
+// ─── Auto-Sell Bot ─────────────────────────────────────────────
+// Watches ALL coins you hold and auto-sells a % when signal triggers
+let botConfig = {
+  riskLevel:      'conservative',
+  sellPct:        25,          // sell this % of holdings when signal triggers
+  confidenceMin:  75,          // minimum RSI confidence to trigger sell
+  checkInterval:  60,          // seconds between checks
+};
+let botState = {
+  running:      false,
+  lastCheck:    null,
+  lastSell:     null,
+  sellsCount:   0,
+  lastSignals:  {},            // { pair: { action, confidence, rsi } }
+};
 
-app.get('/api/bot/config',  requireAuth, (req, res) => res.json({ success:true, data:{...botConfig,state:botState} }));
-app.post('/api/bot/config', requireAuth, (req, res) => { botConfig={...botConfig,...req.body}; res.json({success:true,data:botConfig}); });
-app.get('/api/bot/status',  requireAuth, (req, res) => res.json({ success:true, data:botState }));
-app.post('/api/bot/start',  requireAuth, requireKeys, (req, res) => {
-  if (botState.running) return res.json({success:true,message:'Already running'});
-  botState.running = true;
-  sendTelegram('🤖 <b>KRAKN·AI Auto-Trading Started!</b>');
-  startBotLoop();
-  res.json({success:true,message:'Bot started'});
+app.get('/api/bot/config',  requireAuth, (req, res) => res.json({ success:true, data:{...botConfig, state:botState} }));
+app.post('/api/bot/config', requireAuth, (req, res) => {
+  botConfig = { ...botConfig, ...req.body };
+  res.json({ success:true, data:botConfig });
 });
+app.get('/api/bot/status', requireAuth, (req, res) => res.json({ success:true, data:botState }));
+
+app.post('/api/bot/start', requireAuth, requireKeys, (req, res) => {
+  if (botState.running) return res.json({ success:true, message:'Already running' });
+  botState.running = true;
+  console.log('[AUTO-SELL BOT] Started');
+  sendTelegram(
+    '🤖 <b>KRAKN·AI Auto-Sell Bot Started!</b>\n\n' +
+    `Watching ALL your holdings every ${botConfig.checkInterval} seconds.\n` +
+    `Will auto-sell <b>${botConfig.sellPct}%</b> of any coin when RSI signals overbought.\n` +
+    `Min confidence: <b>${botConfig.confidenceMin}%</b>\n\n` +
+    '⚠️ You will receive a Telegram alert before and after every sell.'
+  );
+  startAutoSellLoop();
+  res.json({ success:true, message:'Auto-sell bot started' });
+});
+
 app.post('/api/bot/stop', requireAuth, (req, res) => {
   botState.running = false;
-  sendTelegram('⏸ <b>KRAKN·AI Auto-Trading Paused</b>');
-  res.json({success:true,message:'Bot stopped'});
+  console.log('[AUTO-SELL BOT] Stopped');
+  sendTelegram('⏸ <b>KRAKN·AI Auto-Sell Bot Paused</b>\nNo more automatic sells will happen.');
+  res.json({ success:true, message:'Bot stopped' });
 });
 
-async function startBotLoop() {
+async function startAutoSellLoop() {
   while (botState.running) {
-    try { for (const pair of botConfig.pairs) await runBotPair(pair); }
-    catch(e) { console.error('[BOT]', e.message); }
-    await new Promise(r => setTimeout(r, 60000));
-  }
-}
-
-async function runBotPair(pair) {
-  const ticker = await fetchSingleTicker(pair);
-  if (!ticker) return;
-  const signal = await computeRSI(pair);
-  botState.lastSignal = { pair, signal, price:ticker.price, timestamp: new Date().toISOString() };
-  if (signal.confidence < botConfig.confidenceMin) return;
-  if (signal.action === 'BUY' || signal.action === 'SELL') {
-    const type   = signal.action.toLowerCase();
-    const volume = (botConfig.maxTradeAUD / ticker.price).toFixed(8);
     try {
-      const order = await krakenPrivateRequest('AddOrder', { pair, type, ordertype:'market', volume });
-      botState.lastTrade = { pair, type, volume, price:ticker.price, txid:order.txid, timestamp:new Date().toISOString() };
-      botState.tradesCount++;
-      const dp = PAIR_DISPLAY[pair]||pair;
-      sendTelegram(`${type==='buy'?'🟢':'🔴'} <b>Bot Trade!</b>\n${type.toUpperCase()} ${volume} <b>${dp}</b>\n$${ticker.price.toLocaleString('en-AU')} AUD`);
-    } catch(e) { console.error('[BOT ORDER]', e.message); }
+      await runAutoSellCheck();
+    } catch(e) {
+      console.error('[AUTO-SELL BOT ERROR]', e.message);
+    }
+    await new Promise(r => setTimeout(r, botConfig.checkInterval * 1000));
   }
 }
 
-async function computeRSI(pair) {
+async function runAutoSellCheck() {
+  botState.lastCheck = new Date().toISOString();
+  console.log('[AUTO-SELL BOT] Checking all holdings...');
+
+  // 1. Get current balance — only check coins we actually hold
+  let balance;
+  try {
+    balance = await krakenPrivateRequest('Balance');
+  } catch(e) {
+    console.error('[AUTO-SELL BOT] Could not fetch balance:', e.message);
+    return;
+  }
+
+  // 2. Build list of coins we hold with their AUD pair
+  const holdings = [];
+  for (const [asset, qty] of Object.entries(balance)) {
+    const amount = parseFloat(qty);
+    if (amount < 0.000001) continue;
+    if (asset === 'ZAUD' || asset === 'AUD') continue; // skip cash
+
+    // Map asset to AUD pair
+    const sym  = asset.replace(/^X/, '').replace(/Z$/, '');
+    const pair = AUD_PAIRS.find(p => p.replace('AUD','') === sym || p.replace('AUD','') === sym.replace('XBT','BTC').replace('BTC','XBT'));
+
+    if (!pair) continue; // skip if we don't have an AUD pair for this coin
+    holdings.push({ asset, sym, qty: amount, pair });
+  }
+
+  if (!holdings.length) {
+    console.log('[AUTO-SELL BOT] No holdings found to check');
+    return;
+  }
+
+  console.log(`[AUTO-SELL BOT] Checking ${holdings.length} holdings: ${holdings.map(h=>h.sym).join(', ')}`);
+
+  // 3. Check RSI signal for each holding
+  for (const holding of holdings) {
+    try {
+      const ticker = await fetchSingleTicker(holding.pair);
+      if (!ticker) continue;
+
+      const signal = await computeRSIForPair(holding.pair);
+      botState.lastSignals[holding.pair] = { ...signal, price: ticker.price, checkedAt: new Date().toISOString() };
+
+      const dp = PAIR_DISPLAY[holding.pair] || holding.pair;
+      console.log(`[AUTO-SELL BOT] ${dp} — RSI: ${signal.rsi} | Signal: ${signal.action} | Confidence: ${signal.confidence}%`);
+
+      // 4. Only sell if signal is strong enough
+      if (signal.action !== 'SELL') continue;
+      if (signal.confidence < botConfig.confidenceMin) {
+        console.log(`[AUTO-SELL BOT] ${dp} sell signal but confidence ${signal.confidence}% < min ${botConfig.confidenceMin}% — skipping`);
+        continue;
+      }
+
+      // 5. Calculate sell volume (% of holdings)
+      const sellQty    = (holding.qty * (botConfig.sellPct / 100));
+      const sellVolume = sellQty.toFixed(8);
+      const sellValueAUD = (sellQty * ticker.price).toFixed(2);
+
+      // 6. Send warning Telegram BEFORE selling
+      await sendTelegram(
+        `⚠️ <b>AUTO-SELL TRIGGERED!</b>\n\n` +
+        `<b>${dp}</b>\n` +
+        `RSI: ${signal.rsi} (Overbought) | Confidence: ${signal.confidence}%\n` +
+        `Current price: $${ticker.price.toLocaleString('en-AU')} AUD\n\n` +
+        `Selling <b>${botConfig.sellPct}%</b> of your ${holding.sym}\n` +
+        `Amount: ${sellVolume} ${holding.sym} (≈ $${sellValueAUD} AUD)\n\n` +
+        `⏳ Placing order now...`
+      );
+
+      // 7. Place the sell order
+      try {
+        const order = await krakenPrivateRequest('AddOrder', {
+          pair:      holding.pair,
+          type:      'sell',
+          ordertype: 'market',
+          volume:    sellVolume,
+        });
+
+        botState.lastSell = {
+          pair:      holding.pair,
+          sym:       holding.sym,
+          volume:    sellVolume,
+          price:     ticker.price,
+          valueAUD:  sellValueAUD,
+          txid:      order.txid,
+          timestamp: new Date().toISOString()
+        };
+        botState.sellsCount++;
+
+        const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
+
+        // 8. Confirm sell via Telegram
+        await sendTelegram(
+          `🔴 <b>AUTO-SELL COMPLETED!</b>\n\n` +
+          `<b>${dp}</b>\n` +
+          `Sold: ${sellVolume} ${holding.sym}\n` +
+          `Price: $${ticker.price.toLocaleString('en-AU')} AUD\n` +
+          `Value: ≈ $${sellValueAUD} AUD\n` +
+          `TXID: ${order.txid?.join(', ')}\n\n` +
+          `RSI was ${signal.rsi} — signal was overbought.\n` +
+          `Remaining: ${(holding.qty - parseFloat(sellVolume)).toFixed(8)} ${holding.sym}\n\n` +
+          `⏰ ${sydneyTime} AEST`
+        );
+
+        console.log(`[AUTO-SELL BOT] ✅ Sold ${sellVolume} ${holding.sym} @ $${ticker.price} AUD`);
+
+      } catch(orderErr) {
+        console.error(`[AUTO-SELL BOT] Order failed for ${holding.sym}:`, orderErr.message);
+        await sendTelegram(
+          `❌ <b>AUTO-SELL FAILED!</b>\n\n` +
+          `<b>${dp}</b> — Could not place sell order\n` +
+          `Error: ${orderErr.message}\n\n` +
+          `Please check the app and sell manually if needed.`
+        );
+      }
+
+      // Small delay between orders
+      await new Promise(r => setTimeout(r, 2000));
+
+    } catch(e) {
+      console.error(`[AUTO-SELL BOT] Error checking ${holding.sym}:`, e.message);
+    }
+  }
+}
+
+async function computeRSIForPair(pair) {
   try {
     const ohlc   = await krakenPublicRequest('OHLC', { pair, interval:60 });
     const k      = Object.keys(ohlc).find(k => k !== 'last');
     const closes = ohlc[k].slice(-14).map(c => parseFloat(c[4]));
     const gains = [], losses = [];
-    for (let i=1;i<closes.length;i++) { const d=closes[i]-closes[i-1]; gains.push(Math.max(d,0)); losses.push(Math.max(-d,0)); }
-    const ag  = gains.reduce((a,b)=>a+b,0)/gains.length;
-    const al  = losses.reduce((a,b)=>a+b,0)/losses.length;
-    const rsi = 100 - (100/(1+(al===0?100:ag/al)));
+    for (let i=1;i<closes.length;i++) {
+      const d = closes[i] - closes[i-1];
+      gains.push(Math.max(d,0));
+      losses.push(Math.max(-d,0));
+    }
+    const ag  = gains.reduce((a,b)=>a+b,0) / gains.length;
+    const al  = losses.reduce((a,b)=>a+b,0) / losses.length;
+    const rsi = 100 - (100 / (1 + (al===0 ? 100 : ag/al)));
     let action='HOLD', confidence=50;
-    if (rsi<30) { action='BUY'; confidence=Math.min(95,60+(30-rsi)*2); }
-    else if (rsi>70) { action='SELL'; confidence=Math.min(95,60+(rsi-70)*2); }
-    if (botConfig.riskLevel==='conservative') confidence*=0.85;
-    if (botConfig.riskLevel==='aggressive')   confidence*=1.10;
-    return { action, confidence:Math.min(99,Math.round(confidence)), rsi:Math.round(rsi) };
-  } catch { return { action:'HOLD', confidence:0, rsi:50 }; }
+
+    // Only trigger SELL — this bot is sell-only
+    if (rsi > 70) {
+      action     = 'SELL';
+      confidence = Math.min(95, 60 + (rsi - 70) * 2);
+    } else if (rsi > 60) {
+      // Soft sell signal
+      action     = 'SELL';
+      confidence = Math.min(70, 50 + (rsi - 60) * 2);
+    }
+
+    // Conservative mode requires higher confidence
+    if (botConfig.riskLevel === 'conservative') confidence *= 0.85;
+    if (botConfig.riskLevel === 'aggressive')   confidence *= 1.10;
+
+    return { action, confidence: Math.min(99, Math.round(confidence)), rsi: Math.round(rsi) };
+  } catch {
+    return { action:'HOLD', confidence:0, rsi:50 };
+  }
+}
+
+
+
+// ── Server-side formatting helpers ────────────────────────────
+function fmtAUDServer(p) {
+  if (!p && p !== 0) return '--';
+  if (p >= 1000) return 'A$' + p.toLocaleString('en-AU', {maximumFractionDigits:0});
+  if (p >= 1)    return 'A$' + parseFloat(p).toFixed(2);
+  return 'A$' + parseFloat(p).toFixed(4);
+}
+function fmtVolume(v) {
+  return parseFloat(v) < 0.001 ? parseFloat(v).toFixed(8) : parseFloat(v).toFixed(4);
 }
 
 // ══════════════════════════════════════════════════════════════
 // TELEGRAM TWO-WAY CHAT
 // ══════════════════════════════════════════════════════════════
 
-// Conversation history per chat (keeps context for follow-up questions)
+// ── Pending Buy State ─────────────────────────────────────────
+// Stores the last buy opportunity sent to Telegram so YES can execute it
+let pendingBuyOpportunity = null;
+
+// ── Conversation history ───────────────────────────────────────
 const chatHistory = {};
 
 // Register webhook with Telegram when server starts
@@ -765,7 +1009,8 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       '• "Run market analysis"\n' +
       '• "What\'s happening in crypto today?"\n' +
       '• "Is now a good time to sell SOL?"\n\n' +
-      '💡 I have access to live AUD prices and your balance.'
+      '💡 When I spot a buy opportunity I\'ll ask if you want to buy.\n' +
+      'Just reply <b>YES</b> to confirm or <b>NO</b> to skip.'
     );
     return;
   }
@@ -773,6 +1018,81 @@ async function handleTelegramMessage(chatId, userMessage, username) {
   if (msg === 'run analysis' || msg === '/analysis' || msg === 'analyse' || msg === 'analyze') {
     await sendTelegramTo(chatId, '⏳ Running full market analysis... give me 30 seconds!');
     await runAdvisor();
+    return;
+  }
+
+  // ── Handle YES — execute pending buy ────────────────────────
+  if (msg === 'yes' || msg === 'yes!' || msg === 'y' || msg === '/yes') {
+    if (!pendingBuyOpportunity) {
+      await sendTelegramTo(chatId, '🤔 No pending buy opportunity — ask me about a coin first!');
+      return;
+    }
+
+    const opp = pendingBuyOpportunity;
+    pendingBuyOpportunity = null; // clear it
+
+    // Check it hasn't expired (10 minutes)
+    const age = (Date.now() - opp.timestamp) / 1000 / 60;
+    if (age > 10) {
+      await sendTelegramTo(chatId, `⏰ That opportunity expired ${Math.round(age)} minutes ago. Ask me again for a fresh signal!`);
+      return;
+    }
+
+    await sendTelegramTo(chatId,
+      `⏳ <b>Placing buy order...</b>\n\n` +
+      `Buying ${fmtVolume(opp.volume)} <b>${opp.sym}</b>\n` +
+      `≈ ${fmtAUDServer(opp.amountAUD)} AUD at market price`
+    );
+
+    try {
+      // Get fresh price first
+      const ticker = await fetchSingleTicker(opp.pair);
+      const freshPrice  = ticker ? ticker.price : opp.price;
+      const freshVolume = (opp.amountAUD / freshPrice).toFixed(8);
+
+      const order = await krakenPrivateRequest('AddOrder', {
+        pair:      opp.pair,
+        type:      'buy',
+        ordertype: 'market',
+        volume:    freshVolume,
+      });
+
+      const valueAUD    = (parseFloat(freshVolume) * freshPrice).toFixed(2);
+      const sydneyTime  = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
+
+      await sendTelegramTo(chatId,
+        `🟢 <b>BUY ORDER PLACED!</b>\n\n` +
+        `<b>${opp.displayPair}</b>\n` +
+        `Bought: ${freshVolume} ${opp.sym}\n` +
+        `Price: ${fmtAUDServer(freshPrice)}\n` +
+        `Total: ≈ ${fmtAUDServer(parseFloat(valueAUD))}\n` +
+        `TXID: ${order.txid?.join(', ')}\n\n` +
+        `⏰ ${sydneyTime} AEST\n\n` +
+        `Good luck! 🚀 I'll monitor and alert you when to sell.`
+      );
+
+      console.log(`[TELEGRAM BUY] ✅ Bought ${freshVolume} ${opp.sym} @ ${freshPrice} AUD`);
+
+    } catch(orderErr) {
+      console.error('[TELEGRAM BUY ERROR]', orderErr.message);
+      await sendTelegramTo(chatId,
+        `❌ <b>BUY ORDER FAILED</b>\n\n` +
+        `Error: ${orderErr.message}\n\n` +
+        `Please check the app and try manually.`
+      );
+    }
+    return;
+  }
+
+  // ── Handle NO — cancel pending buy ──────────────────────────
+  if (msg === 'no' || msg === 'no!' || msg === 'n' || msg === '/no') {
+    if (pendingBuyOpportunity) {
+      const opp = pendingBuyOpportunity;
+      pendingBuyOpportunity = null;
+      await sendTelegramTo(chatId, `👍 Skipped ${opp.sym} buy. I'll keep watching the markets!`);
+    } else {
+      await sendTelegramTo(chatId, '👍 No problem!');
+    }
     return;
   }
 
