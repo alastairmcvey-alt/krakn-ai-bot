@@ -604,8 +604,10 @@ function coin(pair) { return sym(pair); }
 function fmtAUD(p) {
   if (p === null || p === undefined || isNaN(p)) return '--';
   if (p >= 10000) return '$' + Math.round(p).toLocaleString('en-AU');
-  if (p >= 1)     return '$' + parseFloat(p).toFixed(2);
-  return '$' + parseFloat(p).toFixed(4);
+  if (p >= 100)   return '$' + p.toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2});
+  if (p >= 0.01)  return '$' + parseFloat(p).toFixed(2);
+  if (p > 0)      return '$' + parseFloat(p).toFixed(4);
+  return '$0.00';
 }
 function fmtAUDCompact(p) {
   if (!p) return '--';
@@ -613,7 +615,9 @@ function fmtAUDCompact(p) {
   return '$' + parseFloat(p).toFixed(2);
 }
 function getAUDCash() {
-  return Object.entries(balance).reduce((s,[a,q]) => (a==='ZAUD'||a==='AUD') ? s+parseFloat(q) : s, 0);
+  // Include ZAUD, AUD and AUDX — all pegged 1:1 to AUD
+  return Object.entries(balance).reduce((s,[a,q]) =>
+    (a==='ZAUD'||a==='AUD'||a==='AUDX') ? s+parseFloat(q) : s, 0);
 }
 
 // ── API ───────────────────────────────────────────────────────
@@ -1045,11 +1049,20 @@ function renderPortfolio() {
   let totalAUD = 0;
   const holdings = entries.filter(([,q])=>parseFloat(q)>0.000001).map(([asset,qty])=>{
     const s   = asset.replace(/^X/,'').replace(/Z$/,'').replace('XBT','BTC');
-    const pk  = Object.keys(prices).find(k=>k.includes(s==='AUD'?'ZAUD':s));
-    const pr  = pk?prices[pk].price:(asset==='ZAUD'||asset==='AUD'?1:0);
-    const val = parseFloat(qty)*pr;
-    totalAUD += val;
-    return {s, qty:parseFloat(qty), val, chg:pk?parseFloat(prices[pk].change24h):0};
+    // Special cases — assets that are pegged 1:1 to AUD or USD
+    let pr = 0;
+    if (asset === 'ZAUD' || asset === 'AUD' || asset === 'AUDX') {
+      pr = 1; // 1:1 AUD
+    } else if (asset === 'USDC' || asset === 'ZUSD' || asset === 'USD') {
+      // Approximate USD to AUD — use a rough rate or find from prices
+      pr = 1.55; // approximate AUD/USD rate
+    } else {
+      const pk = Object.keys(prices).find(k=>k.includes(s==='AUD'?'ZAUD':s));
+      pr = pk ? prices[pk].price : 0;
+    }
+    const val  = parseFloat(qty)*pr;
+    totalAUD  += val;
+    return {s, qty:parseFloat(qty), val, chg:0, isStable: ['ZAUD','AUD','AUDX','USDC','ZUSD','USD'].includes(asset)};
   });
   const cash = getAUDCash();
 
@@ -1072,12 +1085,12 @@ function renderPortfolio() {
             <div class="holding-icon" style="background:${COLORS[h.s]||'#1A1A1A'}18;color:${COLORS[h.s]||'#888'}">${ICONS[h.s]||h.s[0]}</div>
             <div>
               <div class="holding-name">${h.s}</div>
-              <div class="holding-qty">${h.qty.toFixed(6)}</div>
+              <div class="holding-qty">${h.qty.toFixed(h.qty >= 1 ? 2 : 6)}</div>
             </div>
           </div>
           <div>
-            <div class="holding-val">${fmtAUD(Math.round(h.val))}</div>
-            <div class="holding-chg ${h.chg>=0?'up':'down'}">${h.chg>=0?'▲':'▼'} ${Math.abs(h.chg).toFixed(2)}%</div>
+            <div class="holding-val">${fmtAUD(h.val)}</div>
+            <div class="holding-chg ${h.chg>=0?'up':'down'}">${h.isStable ? 'Stable' : (h.chg>=0?'▲':'▼') + ' ' + Math.abs(h.chg).toFixed(2) + '%'}</div>
           </div>
         </div>`).join('')}
     </div></div>` : ''}
@@ -1266,19 +1279,18 @@ function renderBot() {
       <div style="background:var(--s2);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:16px">
         <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:600;color:var(--grey2);line-height:2;letter-spacing:0.04em">
           ✓ &nbsp;Checks every coin you hold<br>
-          ✓ &nbsp;Sells when RSI signals overbought<br>
+          ✓ &nbsp;Ignores holdings under your minimum value<br>
+          ✓ &nbsp;Sells entire holding when RSI signals overbought<br>
           ✓ &nbsp;Sends Telegram alert before every sell<br>
           ✓ &nbsp;Sends YES/NO buy prompts via Telegram<br>
           ✓ &nbsp;Works while you sleep or offline
         </div>
       </div>
 
-      <div class="field-label">Sell % Per Signal</div>
-      <div class="interval-pills">
-        ${[10,25,50,75].map(p=>`<button class="interval-pill ${botCfg.sellPct===p?'active':''}" onclick="setSellPct(${p})">${p}%</button>`).join('')}
-      </div>
+      <div class="field-label">Minimum Holding Value to Watch (AUD)</div>
+      <input class="input" id="botMinHolding" type="number" value="${botCfg.minHoldingValueAUD||50}" min="10" placeholder="50">
       <div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;margin-bottom:14px">
-        e.g. at 25% — holding 1 BTC → sells 0.25 BTC when triggered
+        Holdings worth less than this will be completely ignored by the bot
       </div>
 
       <div class="field-label">Min Confidence (%)</div>
@@ -1300,9 +1312,11 @@ function renderBot() {
 
     <div class="section-label">How It Works</div>
     <div class="card"><div class="card-body" style="font-size:12px;color:var(--grey2);line-height:1.8">
-      Every <b style="color:var(--white)">60 seconds</b> the bot checks RSI for every coin you hold. When RSI goes above <b style="color:var(--white)">70</b> (overbought) with enough confidence, it auto-sells your chosen percentage and notifies you on Telegram.<br><br>
+      Every <b style="color:var(--white)">60 seconds</b> the bot checks RSI for every coin you hold that is worth more than your minimum value.<br><br>
+      Holdings <b style="color:var(--white)">under your minimum</b> (e.g. $50 AUD) are completely ignored — no spam messages.<br><br>
+      When RSI goes above <b style="color:var(--white)">70</b> (overbought) with enough confidence, it <b style="color:var(--white)">sells the entire holding</b> and notifies you on Telegram.<br><br>
       When RSI drops below <b style="color:var(--white)">30</b> (oversold), you get a <b style="color:var(--cyan)">YES/NO buy prompt</b> in Telegram — reply <b style="color:var(--white)">YES</b> to buy instantly.<br><br>
-      <span style="color:var(--yellow)">⚠️ Start with 25% sell and 75% confidence to test it safely.</span>
+      <span style="color:var(--yellow)">⚠️ Set your minimum value carefully — holdings below it will never be auto-sold.</span>
     </div></div>
     <div class="spacer"></div>
   </div>`;
@@ -1363,8 +1377,9 @@ async function stopBot() {
   catch(e){ showToast('Error: '+e.message); }
 }
 async function saveBotConfig() {
-  botCfg.confidenceMin=parseInt(document.getElementById('botConfMin')?.value)||75;
-  botCfg.riskLevel=document.getElementById('botRisk')?.value||'conservative';
+  botCfg.confidenceMin      = parseInt(document.getElementById('botConfMin')?.value)||75;
+  botCfg.riskLevel          = document.getElementById('botRisk')?.value||'conservative';
+  botCfg.minHoldingValueAUD = parseInt(document.getElementById('botMinHolding')?.value)||50;
   if(!serverOnline){ showToast('Server offline'); return; }
   try { await api('/api/bot/config',{method:'POST',body:JSON.stringify(botCfg)}); showToast('Bot settings saved'); }
   catch(e){ showToast('Error: '+e.message); }
