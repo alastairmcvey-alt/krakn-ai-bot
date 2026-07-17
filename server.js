@@ -1138,31 +1138,74 @@ async function checkBuyOpportunities(marketData) {
       const bal = await krakenPrivateRequest('Balance');
       audCash   = parseFloat(bal['ZAUD'] || bal['AUD'] || 0);
     }
-    if (audCash < 10) return;
+    if (audCash < 10) { console.log('[BUY CHECK] Insufficient AUD cash'); return; }
 
     let bestOpportunity = null;
+
     for (const d of marketData) {
-      if (d.rsi < 30) {
-        const confidence = Math.min(95, 60 + (30 - d.rsi) * 2);
-        if (confidence >= advisorSettings.minConfidence) {
-          if (!bestOpportunity || confidence > bestOpportunity.confidence) {
-            bestOpportunity = { ...d, confidence };
-          }
+      try {
+        // Use full multi-indicator signal — same engine as dashboard
+        const signal = d.signal || await computeSignalForPair(d.pair);
+
+        // Trigger on BUY signal with sufficient confidence
+        // OR RSI oversold even if confidence slightly below threshold
+        const rsiOversold  = signal.rsi <= 32;
+        const strongSignal = signal.action === 'BUY' && signal.confidence >= advisorSettings.minConfidence;
+        const weakSignal   = signal.action === 'BUY' && rsiOversold && signal.confidence >= (advisorSettings.minConfidence - 10);
+
+        if (!strongSignal && !weakSignal) continue;
+
+        const ticker = await fetchSingleTicker(d.pair);
+        if (!ticker) continue;
+
+        // Get sentiment for extra context
+        const sym       = (d.displayPair || PAIR_DISPLAY[d.pair] || d.pair).replace('/AUD','');
+        const sentiment = sentimentCache[sym] || { score: 0, label: 'Unknown' };
+
+        // Score this opportunity — higher is better
+        const oppScore = signal.confidence
+          + (rsiOversold ? 10 : 0)
+          + (sentiment.score > 0 ? sentiment.score : 0);
+
+        if (!bestOpportunity || oppScore > bestOpportunity.oppScore) {
+          bestOpportunity = {
+            pair:         d.pair,
+            displayPair:  d.displayPair || PAIR_DISPLAY[d.pair] || d.pair,
+            sym,
+            price:        ticker.price,
+            change24h:    ticker.change24h,
+            high:         ticker.high,
+            low:          ticker.low,
+            rsi:          signal.rsi,
+            confidence:   signal.confidence,
+            weightedScore: signal.weightedScore,
+            patterns:     signal.patterns || [],
+            sentiment,
+            oppScore,
+          };
         }
-      }
+      } catch(e) { console.warn(`[BUY CHECK] Error checking ${d.pair}:`, e.message); }
     }
 
-    if (!bestOpportunity) return;
+    if (!bestOpportunity) {
+      console.log('[BUY CHECK] No qualifying opportunities this run');
+      return;
+    }
 
     const suggestedAUD = Math.min(audCash * 0.25, audCash - 10);
     if (suggestedAUD < 10) return;
 
-    const volume = (suggestedAUD / bestOpportunity.price).toFixed(8);
+    const volume   = (suggestedAUD / bestOpportunity.price).toFixed(8);
+    const topPat   = bestOpportunity.patterns[0];
+    const patStr   = topPat ? `\nPattern: ${topPat.name} — ${topPat.desc}` : '';
+    const sentStr  = bestOpportunity.sentiment.score !== 0
+      ? `\nSentiment: ${bestOpportunity.sentiment.score}/10 (${bestOpportunity.sentiment.label})`
+      : '';
 
     pendingBuyOpportunity = {
       pair:        bestOpportunity.pair,
       displayPair: bestOpportunity.displayPair,
-      sym:         bestOpportunity.displayPair.replace('/AUD',''),
+      sym:         bestOpportunity.sym,
       price:       bestOpportunity.price,
       amountAUD:   suggestedAUD,
       volume,
@@ -1171,23 +1214,25 @@ async function checkBuyOpportunities(marketData) {
       timestamp:   Date.now(),
     };
 
-    const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
+    const sydneyTime = new Date().toLocaleString('en-AU', {
+      timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short'
+    });
 
     await sendTelegram(
       `🟢 <b>BUY OPPORTUNITY DETECTED!</b>\n\n` +
       `<b>${bestOpportunity.displayPair}</b>\n` +
       `Price: ${fmtAUDServer(bestOpportunity.price)}\n` +
-      `RSI: ${bestOpportunity.rsi} (Oversold 🔥)\n` +
-      `Confidence: ${bestOpportunity.confidence}%\n` +
+      `RSI: ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
       `24h Change: ${bestOpportunity.change24h > 0 ? '+' : ''}${bestOpportunity.change24h}%\n` +
-      `High: ${fmtAUDServer(bestOpportunity.high)} | Low: ${fmtAUDServer(bestOpportunity.low)}\n\n` +
+      `High: ${fmtAUDServer(bestOpportunity.high)} | Low: ${fmtAUDServer(bestOpportunity.low)}` +
+      `${patStr}${sentStr}\n\n` +
       `💰 Suggested: <b>${fmtAUDServer(suggestedAUD)}</b> (25% of your AUD cash)\n` +
-      `= ${volume} ${pendingBuyOpportunity.sym}\n\n` +
+      `= ${volume} ${bestOpportunity.sym}\n\n` +
       `Reply <b>YES</b> to buy now or <b>NO</b> to skip.\n` +
       `⏰ Expires in 10 minutes — ${sydneyTime} AEST`
     );
 
-    console.log(`[BUY OPPORTUNITY] ${bestOpportunity.displayPair} RSI:${bestOpportunity.rsi} — prompt sent`);
+    console.log(`[BUY OPPORTUNITY] ${bestOpportunity.displayPair} RSI:${bestOpportunity.rsi} Score:${bestOpportunity.weightedScore} Conf:${bestOpportunity.confidence}% — prompt sent`);
 
   } catch(e) {
     console.error('[BUY OPPORTUNITY ERROR]', e.message);
@@ -1274,13 +1319,23 @@ async function handleTelegramMessage(chatId, userMessage, username) {
   if (msg === '/start' || msg === 'start') {
     await sendTelegramTo(chatId,
       '🤖 <b>KRAKN·AI Assistant</b>\n\n' +
-      'Ask me anything about crypto!\n\n' +
-      '• "How is BTC looking right now?"\n' +
+      'Commands I understand:\n\n' +
+      '📊 <b>Market signals</b>\n' +
+      '• "Any signals?"\n' +
+      '• "Are there any trades?"\n' +
+      '• "Scan the market"\n' +
+      '• "Any opportunities?"\n\n' +
+      '🔍 <b>Coin specific</b>\n' +
+      '• "How is BTC looking?"\n' +
       '• "Should I buy ETH?"\n' +
+      '• "What\'s SOL doing?"\n\n' +
+      '📈 <b>Portfolio</b>\n' +
       '• "What\'s my portfolio worth?"\n' +
-      '• "Run market analysis"\n' +
-      '• "What\'s happening in crypto today?"\n\n' +
-      '💡 Reply <b>YES</b> to buy prompts or <b>NO</b> to skip.'
+      '• "How am I tracking?"\n\n' +
+      '⚡ <b>Actions</b>\n' +
+      '• "Run analysis" — full market update\n' +
+      '• YES / NO — reply to buy prompts\n\n' +
+      '💡 Or just ask me anything in plain English!'
     );
     return;
   }
@@ -1288,6 +1343,67 @@ async function handleTelegramMessage(chatId, userMessage, username) {
   if (msg === 'run analysis' || msg === '/analysis' || msg === 'analyse' || msg === 'analyze') {
     await sendTelegramTo(chatId, '⏳ Running full market analysis... give me 30 seconds!');
     await runAdvisor();
+    return;
+  }
+
+  // ── Signal check phrases ────────────────────────────────────
+  const signalPhrases = [
+    'any signals', 'are there any signals', 'signals', 'check signals',
+    'any trades', 'should i trade', 'what should i do', 'anything to buy',
+    'anything to sell', 'buy signals', 'sell signals', 'check the market',
+    'market check', 'whats the market doing', "what's the market doing",
+    'scan', 'scan market', 'run signals', '/signals', '/scan',
+    'good time to buy', 'good time to sell', 'any opportunities',
+    'check opportunities', 'opportunities',
+  ];
+
+  if (signalPhrases.some(p => msg.includes(p))) {
+    await sendTelegramTo(chatId, '🔍 Scanning all markets for signals... give me 20 seconds!');
+    try {
+      const fearGreed = await fetchFearGreed();
+      const fgStr     = fearGreed.value ? `😱 Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label})\n\n` : '';
+      const results   = [];
+
+      for (const pair of advisorSettings.pairs) {
+        try {
+          const signal  = await computeSignalForPair(pair);
+          const ticker  = await fetchSingleTicker(pair);
+          const dp      = PAIR_DISPLAY[pair] || pair;
+          const sym     = dp.replace('/AUD','');
+          const sent    = sentimentCache[sym] || await fetchSentimentScore(sym);
+          const topPat  = signal.patterns?.[0];
+
+          const emoji   = signal.action === 'BUY'  ? '🟢' :
+                          signal.action === 'SELL' ? '🔴' : '🟡';
+
+          results.push(
+            `${emoji} <b>${dp}</b> — ${fmtAUDServer(ticker?.price || 0)}\n` +
+            `${signal.action} ${signal.confidence}% | Score: ${signal.weightedScore} | RSI: ${signal.rsi}\n` +
+            `Sentiment: ${sent.score}/10 (${sent.label})\n` +
+            (topPat ? `Pattern: ${topPat.name} — ${topPat.signal}\n` : '') +
+            (signal.signals?.length ? `Signals: ${signal.signals.slice(0,2).join(', ')}` : 'No strong signals')
+          );
+        } catch(e) { console.warn(`[SIGNAL SCAN] ${pair}:`, e.message); }
+      }
+
+      const hasStrong = results.some((_, i) => {
+        const s = advisorSettings.pairs[i];
+        return s && botState.lastSignals[s]?.confidence >= advisorSettings.minConfidence;
+      });
+
+      const summary = results.length
+        ? `🤖 <b>KRAKN·AI Signal Scan</b>\n\n${fgStr}${results.join('\n\n')}\n\n` +
+          (hasStrong ? '💡 Strong signal found — check the YES/NO prompt above!' : '💡 No strong buy/sell signals right now. Watching...')
+        : '⚠️ Could not fetch signals. Try again in a moment.';
+
+      await sendTelegramTo(chatId, summary);
+
+      // Also trigger buy check — will send YES/NO if opportunity found
+      await checkBuyOpportunity();
+
+    } catch(e) {
+      await sendTelegramTo(chatId, '❌ Signal scan failed: ' + e.message);
+    }
     return;
   }
 
@@ -1612,6 +1728,12 @@ app.post('/api/advisor/settings', requireAuth, (req, res) => {
 app.post('/api/advisor/run', requireAuth, async (req, res) => {
   res.json({ success: true, message: 'Running — check Telegram in ~30 seconds!' });
   runAdvisor();
+});
+
+// Manual buy check trigger — forces immediate check without waiting for hourly timer
+app.post('/api/buycheck/run', requireAuth, async (req, res) => {
+  res.json({ success: true, message: 'Running buy check now — check Telegram!' });
+  checkBuyOpportunity();
 });
 
 app.get('/api/alerts', requireAuth, (req, res) => {

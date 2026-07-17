@@ -960,7 +960,7 @@ function renderDashboard() {
         <button class="qa-btn qa-buy"   onclick="quickTrade('buy')">▲ Buy ${s}</button>
         <button class="qa-btn qa-sell"  onclick="quickTrade('sell')">▼ Sell ${s}</button>
         <button class="qa-btn qa-ai"    onclick="runAdvisorNow()">⚡ AI Update</button>
-        <button class="qa-btn qa-alert" onclick="showTab('alerts')">◎ Set Alert</button>
+        <button class="qa-btn qa-alert" onclick="checkBuyNow()">🟢 Check Buys</button>
       </div>
     </div>
 
@@ -1056,6 +1056,15 @@ async function runAdvisorNow() {
   if (!serverOnline) { showToast('Server offline'); return; }
   try { await api('/api/advisor/run', {method:'POST'}); showToast('Analysing markets — check Telegram!'); }
   catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function checkBuyNow() {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  showToast('🟢 Checking buy opportunities...');
+  try {
+    await api('/api/buycheck/run', { method:'POST' });
+    showToast('✅ Done — check Telegram!');
+  } catch(e) { showToast('Error: ' + e.message); }
 }
 
 // ── AI Signal ─────────────────────────────────────────────────
