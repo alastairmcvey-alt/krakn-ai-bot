@@ -4,61 +4,82 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>KRAKN·AI</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
 /* ── Reset & Root ─────────────────────────────────────────── */
 :root {
   --black:   #000000;
-  --s1:      #0A0A0A;
-  --s2:      #111111;
-  --s3:      #1A1A1A;
-  --border:  #222222;
-  --border2: #2A2A2A;
+  --s1:      rgba(0,212,255,0.04);
+  --s2:      rgba(0,212,255,0.07);
+  --s3:      rgba(0,212,255,0.10);
+  --border:  rgba(0,212,255,0.10);
+  --border2: rgba(0,212,255,0.16);
   --white:   #FFFFFF;
-  --grey1:   #888888;
-  --grey2:   #555555;
-  --grey3:   #333333;
+  --grey1:   #94A3B8;
+  --grey2:   #475569;
+  --grey3:   #1E293B;
   --cyan:    #00D4FF;
   --green:   #00C896;
   --red:     #FF4466;
   --yellow:  #FFB800;
 }
 *{ margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-html,body{ height:100%; background:var(--black); color:var(--white); font-family:'Inter',sans-serif; overflow:hidden; }
+html,body{
+  height:100%;
+  background:#000;
+  color:var(--white);
+  font-family:'Space Grotesk',sans-serif;
+  overflow:hidden;
+}
+body::before{
+  content:'';
+  position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(ellipse 60% 40% at 15% 10%, rgba(0,212,255,0.06) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 50% at 85% 85%, rgba(0,100,180,0.05) 0%, transparent 70%);
+}
 
 /* ── App Shell ────────────────────────────────────────────── */
-#app{ height:100vh; display:flex; flex-direction:column; max-width:430px; margin:0 auto; }
+#app{
+  position:relative; z-index:1;
+  height:100vh; display:flex; flex-direction:column;
+  max-width:430px; margin:0 auto;
+}
 
 /* ── Header ───────────────────────────────────────────────── */
 .header{
-  padding:16px 20px 14px;
+  padding:14px 18px 12px;
   display:flex; align-items:center; justify-content:space-between;
   border-bottom:1px solid var(--border);
-  background:var(--black);
+  background:rgba(0,0,0,0.7);
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
   position:sticky; top:0; z-index:100;
 }
 .logo{
-  font-family:'Space Grotesk',sans-serif;
-  font-size:18px; font-weight:700; letter-spacing:0.05em;
-  color:var(--white);
+  font-family:'Space Mono',monospace;
+  font-size:17px; font-weight:700; letter-spacing:0.08em;
+  background:linear-gradient(135deg,#fff 30%,#00D4FF);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
 }
-.logo-dot{ color:var(--cyan); }
+.logo-dot{ -webkit-text-fill-color:#00D4FF; }
 .status-pill{
   display:flex; align-items:center; gap:6px;
-  padding:5px 10px; border-radius:20px;
+  padding:5px 12px; border-radius:20px;
+  background:rgba(0,212,255,0.06);
   border:1px solid var(--border2);
   font-family:'Space Grotesk',sans-serif;
-  font-size:11px; font-weight:500; letter-spacing:0.05em;
+  font-size:11px; font-weight:600; letter-spacing:0.06em;
   color:var(--grey1);
 }
 .status-dot{ width:6px; height:6px; border-radius:50%; background:var(--green); flex-shrink:0; }
 .status-dot.offline{ background:var(--red); }
 .status-dot.pulse{ animation:statusPulse 2s infinite; }
 @keyframes statusPulse{
-  0%,100%{ box-shadow:0 0 0 0 rgba(0,200,150,0.4); }
-  50%{ box-shadow:0 0 0 4px rgba(0,200,150,0); }
+  0%,100%{ box-shadow:0 0 0 0 rgba(0,200,150,0.5); }
+  50%{ box-shadow:0 0 0 5px rgba(0,200,150,0); }
 }
 
 /* ── Content ──────────────────────────────────────────────── */
@@ -69,133 +90,149 @@ html,body{ height:100%; background:var(--black); color:var(--white); font-family
 }
 .content::-webkit-scrollbar{ display:none; }
 
+/* ── Glass Card ───────────────────────────────────────────── */
+.glass{
+  background:linear-gradient(135deg,rgba(0,212,255,0.07),rgba(0,212,255,0.02));
+  border:1px solid var(--border);
+  border-radius:18px;
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+}
+.glass-dark{
+  background:rgba(0,0,0,0.4);
+  border:1px solid var(--border);
+  border-radius:16px;
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+}
+
 /* ── Coin Selector ────────────────────────────────────────── */
 .coin-rail{
   display:flex; gap:0; overflow-x:auto;
   border-bottom:1px solid var(--border);
   -webkit-overflow-scrolling:touch;
+  background:rgba(0,0,0,0.3);
 }
 .coin-rail::-webkit-scrollbar{ display:none; }
 .coin-tab{
-  flex-shrink:0; padding:12px 18px;
+  flex-shrink:0; padding:11px 16px;
   font-family:'Space Grotesk',sans-serif;
-  font-size:12px; font-weight:600; letter-spacing:0.08em;
+  font-size:12px; font-weight:600; letter-spacing:0.06em;
   color:var(--grey2); cursor:pointer;
   border-bottom:2px solid transparent;
+  border-top:none; border-left:none; border-right:none;
   transition:all 0.15s; white-space:nowrap;
-  background:none; border-top:none; border-left:none; border-right:none;
+  background:none;
 }
 .coin-tab.active{
-  color:var(--white);
+  color:var(--cyan);
   border-bottom-color:var(--cyan);
 }
 .coin-tab:active{ opacity:0.7; }
 
-/* ── Hero Price Card ──────────────────────────────────────── */
+/* ── Hero Price ───────────────────────────────────────────── */
 .hero{
-  padding:24px 20px 20px;
+  padding:20px 18px 18px;
   border-bottom:1px solid var(--border);
+  background:rgba(0,0,0,0.2);
 }
 .hero-top{
   display:flex; align-items:flex-start;
-  justify-content:space-between; margin-bottom:4px;
+  justify-content:space-between; margin-bottom:3px;
 }
 .hero-pair{
   font-family:'Space Grotesk',sans-serif;
-  font-size:11px; font-weight:600; letter-spacing:0.12em;
-  color:var(--grey1); text-transform:uppercase;
+  font-size:10px; font-weight:700; letter-spacing:0.14em;
+  color:rgba(0,212,255,0.5); text-transform:uppercase;
 }
 .hero-badge{
   font-family:'Space Grotesk',sans-serif;
-  font-size:10px; font-weight:600; letter-spacing:0.08em;
-  padding:3px 8px; border-radius:4px;
+  font-size:10px; font-weight:700; letter-spacing:0.06em;
+  padding:3px 10px; border-radius:20px;
 }
-.hero-badge.up{ background:rgba(0,200,150,0.12); color:var(--green); }
-.hero-badge.down{ background:rgba(255,68,102,0.12); color:var(--red); }
+.hero-badge.up{ background:rgba(0,200,150,0.1); color:var(--green); border:1px solid rgba(0,200,150,0.2); }
+.hero-badge.down{ background:rgba(255,68,102,0.1); color:var(--red); border:1px solid rgba(255,68,102,0.2); }
 .hero-price{
   font-family:'Space Grotesk',sans-serif;
-  font-size:52px; font-weight:700; letter-spacing:-0.02em;
-  line-height:1; margin-bottom:6px; color:var(--white);
+  font-size:48px; font-weight:700; letter-spacing:-0.03em;
+  line-height:1; margin-bottom:5px;
+  background:linear-gradient(135deg,#fff,rgba(255,255,255,0.8));
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
 }
 .hero-price-sub{
   font-family:'Space Grotesk',sans-serif;
-  font-size:13px; color:var(--grey1); margin-bottom:20px;
+  font-size:12px; color:var(--grey1); margin-bottom:18px;
 }
 .hero-stats{
-  display:grid; grid-template-columns:1fr 1fr 1fr;
-  gap:1px; background:var(--border);
-  border:1px solid var(--border); border-radius:8px;
-  overflow:hidden; margin-bottom:16px;
+  display:grid; grid-template-columns:1fr 1px 1fr 1px 1fr;
+  background:rgba(0,212,255,0.04);
+  border:1px solid var(--border);
+  border-radius:12px; overflow:hidden;
 }
-.hero-stat{
-  padding:10px 12px; background:var(--s1);
-}
+.hero-stat{ padding:10px 12px; }
+.hero-stat-divider{ background:var(--border); }
 .hero-stat-val{
   font-family:'Space Grotesk',sans-serif;
-  font-size:13px; font-weight:600; color:var(--white);
-  margin-bottom:2px;
+  font-size:13px; font-weight:600; color:var(--white); margin-bottom:2px;
 }
 .hero-stat-key{
-  font-size:9px; font-weight:500; letter-spacing:0.1em;
+  font-size:9px; font-weight:700; letter-spacing:0.12em;
   color:var(--grey2); text-transform:uppercase;
 }
 
 /* ── Chart ────────────────────────────────────────────────── */
-.chart-section{ padding:0 20px 16px; }
+.chart-section{ padding:0 18px 16px; }
 .chart-tfs{
   display:flex; gap:4px; margin-bottom:10px; padding-top:16px;
 }
 .tf{
-  padding:4px 10px; border-radius:4px;
+  padding:5px 12px; border-radius:20px;
   font-family:'Space Grotesk',sans-serif;
-  font-size:11px; font-weight:600; letter-spacing:0.06em;
+  font-size:10px; font-weight:700; letter-spacing:0.06em;
   cursor:pointer; border:1px solid var(--border);
   color:var(--grey2); background:none; transition:all 0.15s;
 }
 .tf.active{
-  background:var(--cyan); border-color:var(--cyan);
-  color:var(--black);
+  background:rgba(0,212,255,0.15);
+  border-color:var(--cyan); color:var(--cyan);
 }
 canvas{ width:100%!important; display:block; }
 
 /* ── AI Signal ────────────────────────────────────────────── */
 .signal-strip{
-  margin:0 20px 0;
+  margin:0 18px;
+  border-radius:14px; overflow:hidden;
+  background:linear-gradient(135deg,rgba(0,212,255,0.07),rgba(0,212,255,0.02));
   border:1px solid var(--border2);
-  border-radius:8px; overflow:hidden;
 }
-.signal-strip-inner{
-  display:flex; align-items:stretch;
-}
+.signal-strip-inner{ display:flex; align-items:stretch; }
 .signal-action-block{
   padding:14px 16px;
   display:flex; flex-direction:column;
   justify-content:center; align-items:center;
-  min-width:80px; gap:2px;
+  min-width:76px; gap:2px;
   border-right:1px solid var(--border);
+  border-radius:14px 0 0 14px;
 }
-.signal-action-block.buy{ background:rgba(0,200,150,0.08); }
-.signal-action-block.sell{ background:rgba(255,68,102,0.08); }
-.signal-action-block.hold{ background:rgba(255,184,0,0.06); }
+.signal-action-block.buy{ background:rgba(0,200,150,0.1); }
+.signal-action-block.sell{ background:rgba(255,68,102,0.1); }
+.signal-action-block.hold{ background:rgba(255,184,0,0.07); }
 .signal-word{
   font-family:'Space Grotesk',sans-serif;
-  font-size:18px; font-weight:700; letter-spacing:0.05em;
+  font-size:16px; font-weight:700; letter-spacing:0.05em;
 }
 .signal-word.buy{ color:var(--green); }
 .signal-word.sell{ color:var(--red); }
 .signal-word.hold{ color:var(--yellow); }
 .signal-conf{
   font-family:'Space Grotesk',sans-serif;
-  font-size:10px; font-weight:600; color:var(--grey1);
-  letter-spacing:0.06em;
+  font-size:10px; font-weight:600; color:var(--grey1); letter-spacing:0.04em;
 }
 .signal-info{
   flex:1; padding:12px 14px;
   display:flex; flex-direction:column; justify-content:center; gap:4px;
 }
-.signal-reason{
-  font-size:12px; color:var(--grey1); line-height:1.5;
-}
+.signal-reason{ font-size:12px; color:var(--grey1); line-height:1.5; }
 .signal-suggestion{
   font-family:'Space Grotesk',sans-serif;
   font-size:11px; font-weight:600; color:var(--cyan);
@@ -212,11 +249,14 @@ canvas{ width:100%!important; display:block; }
 
 /* ── Section Label ────────────────────────────────────────── */
 .section-label{
-  padding:20px 20px 10px;
+  padding:18px 18px 10px;
   font-family:'Space Grotesk',sans-serif;
   font-size:10px; font-weight:700; letter-spacing:0.14em;
   color:var(--grey2); text-transform:uppercase;
   display:flex; align-items:center; justify-content:space-between;
+}
+.section-head-line{
+  flex:1; height:1px; background:var(--border); margin-left:10px;
 }
 .section-label-action{
   font-size:10px; color:var(--cyan); cursor:pointer; letter-spacing:0.06em;
@@ -224,47 +264,49 @@ canvas{ width:100%!important; display:block; }
 
 /* ── Markets Grid ─────────────────────────────────────────── */
 .markets{
-  padding:0 20px; display:grid;
-  grid-template-columns:1fr 1fr; gap:8px;
-  margin-bottom:4px;
+  padding:0 18px; display:grid;
+  grid-template-columns:1fr 1fr; gap:8px; margin-bottom:4px;
 }
 .market-tile{
-  padding:14px; border-radius:8px;
+  padding:14px; border-radius:14px;
+  background:rgba(0,212,255,0.04);
   border:1px solid var(--border);
-  background:var(--s1); cursor:pointer;
-  transition:border-color 0.15s; position:relative; overflow:hidden;
+  cursor:pointer; transition:all 0.15s; position:relative; overflow:hidden;
 }
-.market-tile:active{ opacity:0.8; }
-.market-tile.active{ border-color:var(--cyan); }
+.market-tile:active{ opacity:0.8; transform:scale(0.98); }
+.market-tile.active{
+  border-color:rgba(0,212,255,0.3);
+  background:rgba(0,212,255,0.08);
+  box-shadow:0 0 20px rgba(0,212,255,0.05);
+}
 .market-tile-sym{
   font-family:'Space Grotesk',sans-serif;
-  font-size:12px; font-weight:700; letter-spacing:0.06em;
+  font-size:11px; font-weight:700; letter-spacing:0.08em;
   color:var(--grey1); margin-bottom:6px;
   display:flex; align-items:center; justify-content:space-between;
 }
-.market-sig-dot{
-  width:5px; height:5px; border-radius:50%;
-}
+.market-sig-dot{ width:5px; height:5px; border-radius:50%; }
 .market-tile-price{
   font-family:'Space Grotesk',sans-serif;
-  font-size:16px; font-weight:700; color:var(--white);
+  font-size:15px; font-weight:700; color:var(--white);
   margin-bottom:2px; letter-spacing:-0.01em;
 }
 .market-tile-chg{
   font-family:'Space Grotesk',sans-serif;
-  font-size:11px; font-weight:600;
+  font-size:10px; font-weight:600;
 }
 .market-tile-bar{
-  position:absolute; bottom:0; left:0;
-  height:2px; transition:width 0.6s;
+  position:absolute; bottom:0; left:0; height:2px; transition:width 0.6s;
 }
 .up{ color:var(--green); }
 .down{ color:var(--red); }
 
 /* ── Alerts Compact ───────────────────────────────────────── */
 .alerts-compact{
-  margin:0 20px; border:1px solid var(--border);
-  border-radius:8px; overflow:hidden; margin-bottom:4px;
+  margin:0 18px;
+  border:1px solid var(--border); border-radius:14px;
+  overflow:hidden; margin-bottom:4px;
+  background:rgba(0,0,0,0.3);
 }
 .alert-row-compact{
   display:flex; align-items:center; justify-content:space-between;
@@ -274,111 +316,94 @@ canvas{ width:100%!important; display:block; }
 .alert-pill{
   font-family:'Space Grotesk',sans-serif;
   font-size:9px; font-weight:700; letter-spacing:0.1em;
-  padding:2px 6px; border-radius:3px; text-transform:uppercase;
+  padding:2px 7px; border-radius:20px; text-transform:uppercase;
 }
-.pill-above{ background:rgba(0,200,150,0.12); color:var(--green); }
-.pill-below{ background:rgba(255,68,102,0.12); color:var(--red); }
-.badge-triggered{ background:rgba(255,184,0,0.12); color:var(--yellow); }
+.pill-above{ background:rgba(0,200,150,0.1); color:var(--green); border:1px solid rgba(0,200,150,0.2); }
+.pill-below{ background:rgba(255,68,102,0.1); color:var(--red); border:1px solid rgba(255,68,102,0.2); }
+.badge-triggered{ background:rgba(255,184,0,0.1); color:var(--yellow); }
 .alert-compact-text{
   font-family:'Space Grotesk',sans-serif;
   font-size:12px; font-weight:600; color:var(--white); margin-left:8px;
 }
-.alert-compact-status{
-  font-family:'Space Grotesk',sans-serif;
-  font-size:11px; color:var(--grey2);
-}
+.alert-compact-status{ font-family:'Space Grotesk',sans-serif; font-size:11px; color:var(--grey2); }
 
 /* ── Quick Actions ────────────────────────────────────────── */
 .quick-actions{
-  padding:0 20px; display:grid;
-  grid-template-columns:1fr 1fr; gap:8px;
-  margin-bottom:8px;
+  padding:0 18px; display:grid;
+  grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;
 }
 .qa-btn{
-  padding:14px; border-radius:8px;
+  padding:13px; border-radius:12px;
   font-family:'Space Grotesk',sans-serif;
   font-size:12px; font-weight:700; letter-spacing:0.04em;
-  cursor:pointer; border:1px solid var(--border);
-  transition:all 0.15s; text-align:center;
+  cursor:pointer; transition:all 0.15s; text-align:center;
+  border:1px solid var(--border);
 }
-.qa-btn:active{ transform:scale(0.97); }
-.qa-buy{
-  background:rgba(0,200,150,0.1);
-  border-color:rgba(0,200,150,0.3);
-  color:var(--green);
-}
-.qa-sell{
-  background:rgba(255,68,102,0.1);
-  border-color:rgba(255,68,102,0.3);
-  color:var(--red);
-}
-.qa-ai{
-  background:rgba(0,212,255,0.08);
-  border-color:rgba(0,212,255,0.25);
-  color:var(--cyan);
-}
-.qa-alert{
-  background:var(--s1); color:var(--grey1);
-}
+.qa-btn:active{ transform:scale(0.96); }
+.qa-buy{ background:rgba(0,200,150,0.1); border-color:rgba(0,200,150,0.25); color:var(--green); }
+.qa-sell{ background:rgba(255,68,102,0.1); border-color:rgba(255,68,102,0.25); color:var(--red); }
+.qa-ai{ background:rgba(0,212,255,0.07); border-color:rgba(0,212,255,0.2); color:var(--cyan); }
+.qa-alert{ background:rgba(255,255,255,0.03); color:var(--grey1); }
 
 /* ── General Card ─────────────────────────────────────────── */
 .card{
-  margin:0 20px; border:1px solid var(--border);
-  border-radius:8px; overflow:hidden; margin-bottom:8px;
+  margin:0 18px;
+  background:rgba(0,0,0,0.3);
+  border:1px solid var(--border); border-radius:14px;
+  overflow:hidden; margin-bottom:8px;
 }
 .card-body{ padding:16px; }
 
 /* ── Form Elements ────────────────────────────────────────── */
 .field-label{
   font-family:'Space Grotesk',sans-serif;
-  font-size:10px; font-weight:700; letter-spacing:0.1em;
+  font-size:10px; font-weight:700; letter-spacing:0.12em;
   color:var(--grey2); text-transform:uppercase; margin-bottom:6px;
 }
 .input{
-  width:100%; background:var(--s2);
-  border:1px solid var(--border2); border-radius:6px;
+  width:100%;
+  background:rgba(0,212,255,0.04);
+  border:1px solid var(--border2); border-radius:10px;
   padding:11px 14px; color:var(--white);
   font-family:'Space Grotesk',sans-serif; font-size:14px; font-weight:500;
-  margin-bottom:12px; outline:none; transition:border-color 0.15s;
+  margin-bottom:12px; outline:none; transition:all 0.15s;
   -webkit-appearance:none;
 }
-.input:focus{ border-color:var(--cyan); }
+.input:focus{ border-color:var(--cyan); background:rgba(0,212,255,0.07); }
 select.input{ cursor:pointer; }
 
 /* ── Buttons ──────────────────────────────────────────────── */
 .btn{
-  width:100%; padding:14px; border:none; border-radius:6px;
+  width:100%; padding:14px; border:none; border-radius:12px;
   font-family:'Space Grotesk',sans-serif;
   font-size:13px; font-weight:700; letter-spacing:0.06em;
   cursor:pointer; transition:all 0.15s; text-transform:uppercase;
 }
-.btn:active{ transform:scale(0.98); }
-.btn-buy{ background:var(--green); color:var(--black); }
-.btn-sell{ background:var(--red); color:var(--white); }
-.btn-cyan{ background:var(--cyan); color:var(--black); }
-.btn-ghost{
-  background:none; border:1px solid var(--border2);
-  color:var(--grey1);
-}
-.btn-telegram{ background:#229ED9; color:var(--white); }
-.btn-danger{ background:var(--red); color:var(--white); }
+.btn:active{ transform:scale(0.97); }
+.btn-buy{ background:linear-gradient(135deg,#00C896,#009970); color:#000; }
+.btn-sell{ background:linear-gradient(135deg,#FF4466,#CC2244); color:#fff; }
+.btn-cyan{ background:linear-gradient(135deg,#00D4FF,#0099BB); color:#000; }
+.btn-ghost{ background:rgba(255,255,255,0.04); border:1px solid var(--border2); color:var(--grey1); }
+.btn-telegram{ background:#229ED9; color:#fff; }
+.btn-danger{ background:rgba(255,68,102,0.15); border:1px solid rgba(255,68,102,0.3); color:var(--red); }
 .row2{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 
 /* ── Trade Tabs ───────────────────────────────────────────── */
 .trade-tabs{
-  display:flex; border-bottom:1px solid var(--border); margin-bottom:16px;
+  display:flex; background:rgba(0,0,0,0.3); border-radius:10px;
+  padding:3px; gap:3px; margin-bottom:16px;
+  border:1px solid var(--border);
 }
 .trade-tab{
-  flex:1; padding:12px; text-align:center; cursor:pointer;
+  flex:1; padding:10px; text-align:center; cursor:pointer;
   font-family:'Space Grotesk',sans-serif;
   font-size:11px; font-weight:700; letter-spacing:0.08em;
-  color:var(--grey2); border-bottom:2px solid transparent;
-  background:none; border-top:none; border-left:none; border-right:none;
-  transition:all 0.15s;
+  color:var(--grey2); border-radius:8px;
+  background:none; border:none; transition:all 0.15s;
 }
-.trade-tab.buy.active{ color:var(--green); border-bottom-color:var(--green); }
-.trade-tab.sell.active{ color:var(--red); border-bottom-color:var(--red); }
-.trade-tab.futures.active{ color:var(--cyan); border-bottom-color:var(--cyan); }
+.trade-tab.buy.active{ background:rgba(0,200,150,0.15); color:var(--green); }
+.trade-tab.sell.active{ background:rgba(255,68,102,0.15); color:var(--red); }
+.trade-tab.futures.active{ background:rgba(0,212,255,0.15); color:var(--cyan); }
 
 /* ── Holdings ─────────────────────────────────────────────── */
 .holding-row{
@@ -392,21 +417,10 @@ select.input{ cursor:pointer; }
   font-family:'Space Grotesk',sans-serif;
   font-size:13px; font-weight:700; flex-shrink:0;
 }
-.holding-name{
-  font-family:'Space Grotesk',sans-serif;
-  font-size:13px; font-weight:600;
-}
-.holding-qty{
-  font-size:11px; color:var(--grey2); margin-top:1px;
-}
-.holding-val{
-  font-family:'Space Grotesk',sans-serif;
-  font-size:14px; font-weight:700; text-align:right;
-}
-.holding-chg{
-  font-family:'Space Grotesk',sans-serif;
-  font-size:11px; font-weight:600; text-align:right; margin-top:1px;
-}
+.holding-name{ font-family:'Space Grotesk',sans-serif; font-size:13px; font-weight:600; }
+.holding-qty{ font-size:11px; color:var(--grey2); margin-top:1px; }
+.holding-val{ font-family:'Space Grotesk',sans-serif; font-size:14px; font-weight:700; text-align:right; }
+.holding-chg{ font-family:'Space Grotesk',sans-serif; font-size:11px; font-weight:600; text-align:right; margin-top:1px; }
 
 /* ── Order Rows ───────────────────────────────────────────── */
 .order-row{
@@ -417,42 +431,36 @@ select.input{ cursor:pointer; }
 .order-badge{
   font-family:'Space Grotesk',sans-serif;
   font-size:9px; font-weight:700; letter-spacing:0.1em;
-  padding:2px 7px; border-radius:3px; text-transform:uppercase;
+  padding:2px 8px; border-radius:20px; text-transform:uppercase;
 }
-.badge-buy{ background:rgba(0,200,150,0.12); color:var(--green); }
-.badge-sell{ background:rgba(255,68,102,0.12); color:var(--red); }
+.badge-buy{ background:rgba(0,200,150,0.1); color:var(--green); border:1px solid rgba(0,200,150,0.2); }
+.badge-sell{ background:rgba(255,68,102,0.1); color:var(--red); border:1px solid rgba(255,68,102,0.2); }
 
 /* ── Bot Card ─────────────────────────────────────────────── */
 .bot-header{
   padding:16px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
 }
-.bot-title{
-  font-family:'Space Grotesk',sans-serif;
-  font-size:14px; font-weight:700;
-}
+.bot-title{ font-family:'Space Grotesk',sans-serif; font-size:14px; font-weight:700; }
 .bot-subtitle{ font-size:11px; color:var(--grey2); margin-top:2px; }
 .running-badge{
   font-family:'Space Grotesk',sans-serif;
   font-size:10px; font-weight:700; letter-spacing:0.1em;
-  padding:4px 10px; border-radius:20px;
-  text-transform:uppercase;
+  padding:4px 12px; border-radius:20px; text-transform:uppercase;
 }
-.running-badge.on{ background:rgba(0,200,150,0.12); color:var(--green); }
-.running-badge.off{ background:var(--s3); color:var(--grey2); }
+.running-badge.on{ background:rgba(0,200,150,0.1); color:var(--green); border:1px solid rgba(0,200,150,0.2); }
+.running-badge.off{ background:rgba(255,255,255,0.04); color:var(--grey2); border:1px solid var(--border); }
 
 /* ── Interval Pills ───────────────────────────────────────── */
 .interval-pills{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px; }
 .interval-pill{
-  padding:6px 14px; border-radius:4px;
+  padding:6px 14px; border-radius:20px;
   font-family:'Space Grotesk',sans-serif;
   font-size:11px; font-weight:700; letter-spacing:0.06em;
   cursor:pointer; border:1px solid var(--border);
   color:var(--grey2); background:none; transition:all 0.15s;
 }
-.interval-pill.active{
-  background:var(--cyan); border-color:var(--cyan); color:var(--black);
-}
+.interval-pill.active{ background:rgba(0,212,255,0.15); border-color:var(--cyan); color:var(--cyan); }
 
 /* ── Alert Rows ───────────────────────────────────────────── */
 .alert-item{
@@ -465,14 +473,16 @@ select.input{ cursor:pointer; }
 .bottom-nav{
   position:fixed; bottom:0; left:50%; transform:translateX(-50%);
   width:100%; max-width:430px;
-  background:var(--black); border-top:1px solid var(--border);
+  background:rgba(0,0,0,0.85);
+  backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+  border-top:1px solid var(--border);
   display:flex; padding:8px 0 calc(8px + env(safe-area-inset-bottom));
   z-index:100;
 }
 .nav-btn{
   flex:1; display:flex; flex-direction:column;
   align-items:center; gap:3px; cursor:pointer;
-  padding:6px 0; opacity:0.35; transition:opacity 0.15s;
+  padding:5px 0; opacity:0.3; transition:opacity 0.15s;
   background:none; border:none;
 }
 .nav-btn.active{ opacity:1; }
@@ -500,40 +510,35 @@ select.input{ cursor:pointer; }
 /* ── Toast ────────────────────────────────────────────────── */
 .toast{
   position:fixed; top:72px; left:50%; transform:translateX(-50%);
-  background:var(--s2); border:1px solid var(--border2);
-  border-radius:6px; padding:10px 18px;
+  background:rgba(0,0,0,0.9);
+  border:1px solid var(--border2); border-radius:20px;
+  padding:10px 20px;
   font-family:'Space Grotesk',sans-serif;
   font-size:12px; font-weight:600; letter-spacing:0.04em;
-  z-index:999; box-shadow:0 8px 24px rgba(0,0,0,0.6);
+  z-index:999;
+  box-shadow:0 8px 32px rgba(0,0,0,0.8),0 0 0 1px rgba(0,212,255,0.1);
   animation:toastIn 0.2s ease; white-space:nowrap;
   max-width:88vw; text-align:center;
+  backdrop-filter:blur(20px);
 }
 @keyframes toastIn{ from{ opacity:0; top:60px; } to{ opacity:1; top:72px; } }
 
 /* ── Banners ──────────────────────────────────────────────── */
 .banner{
-  margin:16px 20px 0; padding:12px 14px;
-  border-radius:6px; font-size:12px; line-height:1.6;
+  margin:14px 18px 0; padding:12px 14px;
+  border-radius:12px; font-size:12px; line-height:1.6;
 }
 .banner a{ color:var(--cyan); text-decoration:none; }
-.banner-warn{
-  background:rgba(255,184,0,0.06);
-  border:1px solid rgba(255,184,0,0.2); color:var(--grey1);
-}
-.banner-ok{
-  background:rgba(0,200,150,0.06);
-  border:1px solid rgba(0,200,150,0.2); color:var(--grey1);
-}
+.banner-warn{ background:rgba(255,184,0,0.06); border:1px solid rgba(255,184,0,0.2); color:var(--grey1); }
+.banner-ok{ background:rgba(0,200,150,0.06); border:1px solid rgba(0,200,150,0.2); color:var(--grey1); }
 
 /* ── Misc ─────────────────────────────────────────────────── */
-.divider{ height:1px; background:var(--border); margin:0 20px; }
+.divider{ height:1px; background:var(--border); margin:0 18px; }
 .spacer{ height:8px; }
-.mono{
-  font-family:'Space Grotesk',sans-serif;
-  font-weight:600;
-}
+.mono{ font-family:'Space Grotesk',sans-serif; font-weight:600; }
 .fade-in{ animation:fadeIn 0.25s ease; }
-@keyframes fadeIn{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:translateY(0); } }
+@keyframes fadeIn{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:translateY(0); } }
+.btn-telegram{ background:rgba(34,158,217,0.15); border:1px solid rgba(34,158,217,0.3); color:#229ED9; }
 </style>
 </head>
 <body>
@@ -543,8 +548,9 @@ select.input{ cursor:pointer; }
     <div style="display:flex;align-items:center;gap:10px">
       <div class="logo">KRAKN<span class="logo-dot">·</span>AI</div>
       <div id="versionBadge" style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;
-        letter-spacing:0.1em;padding:2px 7px;border-radius:3px;background:var(--s3);
-        border:1px solid var(--border);color:var(--grey2)">v3.1</div>
+        letter-spacing:0.1em;padding:2px 8px;border-radius:20px;
+        background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);
+        color:rgba(0,212,255,0.6)">v4.0</div>
     </div>
     <div class="status-pill">
       <div class="status-dot pulse" id="statusDot"></div>
@@ -784,46 +790,47 @@ function renderDashboard() {
       : ''}
 
     <!-- Portfolio Hero Card -->
-    <div style="padding:20px 16px 0">
-      <div style="background:var(--s1);border:1px solid var(--border);border-radius:12px;overflow:hidden">
+    <div style="padding:16px 18px 0">
+      <div style="background:linear-gradient(135deg,rgba(0,212,255,0.08),rgba(0,212,255,0.02));border:1px solid rgba(0,212,255,0.14);border-radius:20px;overflow:hidden;position:relative">
+        <div style="position:absolute;top:-30px;right:-30px;width:120px;height:120px;background:radial-gradient(circle,rgba(0,212,255,0.08),transparent 70%);border-radius:50%;pointer-events:none"></div>
 
         <!-- Total Value -->
-        <div style="padding:18px 18px 14px;border-bottom:1px solid var(--border)">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:var(--grey2);text-transform:uppercase;margin-bottom:6px">
+        <div style="padding:20px 20px 16px;border-bottom:1px solid rgba(0,212,255,0.08)">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.16em;color:rgba(0,212,255,0.5);text-transform:uppercase;margin-bottom:6px">
             Total Portfolio Value
           </div>
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:46px;font-weight:700;letter-spacing:-0.02em;line-height:1;color:var(--white)" id="dashTotal">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:44px;font-weight:700;letter-spacing:-0.02em;line-height:1;background:linear-gradient(135deg,#fff,rgba(255,255,255,0.8));-webkit-background-clip:text;-webkit-text-fill-color:transparent" id="dashTotal">
             ${totalPortfolio > 0 ? fmtAUD(Math.round(totalPortfolio)) : '---'}
           </div>
           ${totalPortfolio > 0 ? `
-          <div style="display:flex;gap:16px;margin-top:10px">
+          <div style="display:flex;gap:18px;margin-top:12px">
             <div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:600;color:var(--cyan)" id="dashInvested">${fmtAUD(Math.round(totalInvested))}</div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:var(--grey2);text-transform:uppercase;margin-top:2px">Invested</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:600;color:var(--cyan)" id="dashInvested">${fmtAUD(Math.round(totalInvested))}</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.12em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-top:2px">Invested</div>
             </div>
-            <div style="width:1px;background:var(--border)"></div>
+            <div style="width:1px;background:rgba(0,212,255,0.1)"></div>
             <div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:600;color:var(--green)" id="dashCash">${fmtAUD(Math.round(cashAvailable))}</div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:var(--grey2);text-transform:uppercase;margin-top:2px">Available Cash</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:600;color:var(--green)" id="dashCash">${fmtAUD(Math.round(cashAvailable))}</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.12em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-top:2px">Available Cash</div>
             </div>
-            <div style="width:1px;background:var(--border)"></div>
+            <div style="width:1px;background:rgba(0,212,255,0.1)"></div>
             <div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:600;color:var(--grey1)">${holdingRows.filter(h=>!h.isCash&&h.val>0).length}</div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:var(--grey2);text-transform:uppercase;margin-top:2px">Positions</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:600;color:rgba(255,255,255,0.6)">${holdingRows.filter(h=>!h.isCash&&h.val>0).length}</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.12em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-top:2px">Positions</div>
             </div>
-          </div>` : '<div style="font-size:12px;color:var(--grey2);margin-top:8px">Connect server in Settings to see live balance</div>'}
+          </div>` : '<div style="font-size:12px;color:var(--grey2);margin-top:8px;font-family:\'Space Grotesk\',sans-serif">Connect server in Settings to see live balance</div>'}
         </div>
 
         <!-- P&L Card -->
-        <div style="padding:14px 18px" id="pnlCardSection">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:var(--grey2);text-transform:uppercase">
+        <div style="padding:14px 20px" id="pnlCardSection">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.16em;color:rgba(0,212,255,0.5);text-transform:uppercase">
               Profit & Loss
             </div>
             ${hasPnl ? `
               <div style="display:flex;gap:8px;align-items:center">
                 <button onclick="togglePnLBreakdown()" style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;color:var(--cyan);background:none;border:none;cursor:pointer;letter-spacing:0.06em" id="pnlBreakdownBtn">BREAKDOWN ▼</button>
-                <button onclick="resetPnL()" style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;color:var(--grey2);background:none;border:1px solid var(--border);border-radius:4px;padding:2px 6px;cursor:pointer">RESET</button>
+                <button onclick="resetPnL()" style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;color:var(--grey2);background:none;border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:2px 8px;cursor:pointer">RESET</button>
               </div>` : ''}
           </div>
 
@@ -832,22 +839,22 @@ function renderDashboard() {
           <div style="display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;gap:0">
             <div style="text-align:center;padding:4px 0">
               <div style="font-family:'Space Grotesk',sans-serif;font-size:17px;font-weight:700;color:${totalPnl>=0?'var(--green)':'var(--red)'}" id="dashPnlTotal">${totalPnl>=0?'+':''}${fmtAUD(totalPnl)}</div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:var(--grey2);text-transform:uppercase;margin-top:3px">Total P&L</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-top:3px">Total P&L</div>
             </div>
-            <div style="background:var(--border)"></div>
+            <div style="background:rgba(0,212,255,0.1)"></div>
             <div style="text-align:center;padding:4px 0">
               <div style="font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:700;color:${realisedPnl>=0?'var(--green)':'var(--red)'}" id="dashPnlRealised">${realisedPnl>=0?'+':''}${fmtAUD(realisedPnl)}</div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:var(--grey2);text-transform:uppercase;margin-top:3px">Realised</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-top:3px">Realised</div>
             </div>
-            <div style="background:var(--border)"></div>
+            <div style="background:rgba(0,212,255,0.1)"></div>
             <div style="text-align:center;padding:4px 0">
               <div style="font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:700;color:${unrealisedPnl>=0?'var(--green)':'var(--red)'}" id="dashPnlUnreal">${unrealisedPnl>=0?'+':''}${fmtAUD(unrealisedPnl)}</div>
-              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:var(--grey2);text-transform:uppercase;margin-top:3px">Unrealised</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-top:3px">Unrealised</div>
             </div>
           </div>
 
           <!-- P&L Breakdown (hidden by default) -->
-          <div id="pnlBreakdown" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+          <div id="pnlBreakdown" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(0,212,255,0.08)">
             ${pnlAssets.length ? pnlAssets.map(a => `
               <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)">
                 <div style="display:flex;align-items:center;gap:10px">
@@ -873,15 +880,15 @@ function renderDashboard() {
 
     <!-- Holdings Mini Strip -->
     ${holdingRows.filter(h => !h.isCash && h.val > 1).length > 0 ? `
-    <div style="padding:12px 16px 0">
+    <div style="padding:14px 18px 0">
       <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:var(--grey2);text-transform:uppercase;margin-bottom:8px">Holdings</div>
-      <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:2px" id="holdingsStrip">
+      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px" id="holdingsStrip">
         ${holdingRows.filter(h => !h.isCash && h.val > 1).map(h => `
           <div onclick="selectCoin('${Object.keys(DISPLAY).find(k=>k.includes(h.s==='BTC'?'XBT':h.s))||''}')"
-            style="flex-shrink:0;background:var(--s1);border:1px solid ${h.chg>=0?'rgba(0,200,150,0.2)':'rgba(255,68,102,0.2)'};border-radius:8px;padding:10px 12px;cursor:pointer;min-width:90px">
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;color:${COLORS[h.s]||'#888'};margin-bottom:4px">${h.s}</div>
+            style="flex-shrink:0;background:rgba(0,212,255,0.05);border:1px solid ${h.chg>=0?'rgba(0,200,150,0.2)':'rgba(255,68,102,0.15)'};border-radius:12px;padding:10px 14px;cursor:pointer;min-width:90px;transition:all 0.15s">
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;color:${COLORS[h.s]||'#888'};margin-bottom:5px">${h.s}</div>
             <div style="font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:700;color:var(--white)">${fmtAUD(h.val)}</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:600;color:${h.chg>=0?'var(--green)':'var(--red)'}">
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:600;margin-top:2px;color:${h.chg>=0?'var(--green)':'var(--red)'}">
               ${h.chg>=0?'▲':'▼'} ${Math.abs(h.chg).toFixed(1)}%
             </div>
           </div>`).join('')}
@@ -889,7 +896,7 @@ function renderDashboard() {
     </div>` : ''}
 
     <!-- Coin Selector + Chart -->
-    <div style="padding:12px 16px 0">
+    <div style="padding:14px 18px 0">
       <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:var(--grey2);text-transform:uppercase;margin-bottom:8px">Markets</div>
     </div>
     <div class="coin-rail" id="coinRail">
@@ -903,21 +910,21 @@ function renderDashboard() {
     </div>
 
     <!-- Selected Coin Price + Chart -->
-    <div style="padding:12px 16px 0">
+    <div style="padding:12px 18px 0">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div>
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;letter-spacing:-0.01em" id="heroPrice">${fmtAUD(p.price)}</div>
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700;letter-spacing:-0.02em;background:linear-gradient(135deg,#fff,rgba(255,255,255,0.8));-webkit-background-clip:text;-webkit-text-fill-color:transparent" id="heroPrice">${fmtAUD(p.price)}</div>
           <div style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:600;margin-top:2px" class="${chg>=0?'up':'down'}" id="heroChg">${chg>=0?'▲':'▼'} ${Math.abs(chg).toFixed(2)}% · ${DISPLAY[selectedPair]||selectedPair}</div>
         </div>
         <div style="display:flex;gap:4px">
-          ${['15M','1H','4H','1D'].map(tf=>`<button class="tf ${tf===chartTF?'active':''}" onclick="changeTF('${tf}')">${tf}</button>`).join('')}
+          ${['1M','5M','15M','1H','4H','1D'].map(tf=>`<button class="tf ${tf===chartTF?'active':''}" onclick="changeTF('${tf}')">${tf}</button>`).join('')}
         </div>
       </div>
       <canvas id="mainChart" style="height:90px"></canvas>
     </div>
 
     <!-- AI Signal -->
-    <div style="padding:10px 16px 0">
+    <div style="padding:10px 18px 0">
       <div class="signal-strip">
         <div class="signal-strip-inner">
           <div class="signal-action-block ${sig?sig.action.toLowerCase():'hold'}" id="sigBlock">
@@ -935,9 +942,26 @@ function renderDashboard() {
       </div>
     </div>
 
+    <!-- On-Chain Panel -->
+    <div style="padding:10px 18px 0">
+      <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,212,255,0.08);border-radius:14px;padding:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:rgba(0,212,255,0.5);text-transform:uppercase">
+            On-Chain Intelligence — ${s}
+          </div>
+          <button onclick="loadOnChain('${s}')" style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;color:var(--cyan);background:none;border:none;cursor:pointer;letter-spacing:0.06em">
+            FETCH ↗
+          </button>
+        </div>
+        <div id="onchainPanel" style="font-size:12px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">
+          Tap FETCH for whale movements, exchange flows, network health
+        </div>
+      </div>
+    </div>
+
     <!-- Active Alerts -->
     ${activeAlerts.length ? `
-    <div style="padding:12px 16px 0">
+    <div style="padding:12px 18px 0">
       <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:var(--grey2);text-transform:uppercase;margin-bottom:8px;display:flex;justify-content:space-between">
         Active Alerts (${activeAlerts.length})
         <span style="color:var(--cyan);cursor:pointer" onclick="showTab('alerts')">Manage</span>
@@ -955,12 +979,37 @@ function renderDashboard() {
     </div>` : ''}
 
     <!-- Quick Actions -->
-    <div style="padding:12px 16px 16px">
+    <div style="padding:12px 18px 0">
       <div class="quick-actions" style="padding:0">
         <button class="qa-btn qa-buy"   onclick="quickTrade('buy')">▲ Buy ${s}</button>
         <button class="qa-btn qa-sell"  onclick="quickTrade('sell')">▼ Sell ${s}</button>
         <button class="qa-btn qa-ai"    onclick="runAdvisorNow()">⚡ AI Update</button>
         <button class="qa-btn qa-alert" onclick="checkBuyNow()">🟢 Check Buys</button>
+      </div>
+    </div>
+
+    <!-- Inline Manual Trade Panel -->
+    <div style="padding:10px 18px 16px">
+      <div style="background:rgba(0,0,0,0.35);border:1px solid rgba(0,212,255,0.1);border-radius:16px;padding:14px">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:rgba(0,212,255,0.5);text-transform:uppercase;margin-bottom:10px">
+          Quick Trade — ${DISPLAY[selectedPair]||selectedPair}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+          <input type="number" id="dashTradeAmt" placeholder="AUD amount" value="${sig&&sig.suggestedAmountAUD?Math.round(sig.suggestedAmountAUD):''}"
+            style="flex:1;background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.15);color:#fff;padding:10px 12px;border-radius:10px;font-size:14px;font-family:'Space Grotesk',sans-serif;outline:none"
+            oninput="updateDashTradeVolume()">
+          <span id="dashTradeVol" style="font-size:11px;color:rgba(0,212,255,0.6);font-family:'Space Grotesk',sans-serif;white-space:nowrap;min-width:60px">
+            ${p.price ? '≈ ' + (100/p.price).toFixed(6) + ' ' + s : ''}
+          </span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <button onclick="dashTrade('buy')" style="padding:12px;background:linear-gradient(135deg,rgba(0,200,150,0.15),rgba(0,200,150,0.05));border:1px solid rgba(0,200,150,0.3);border-radius:12px;color:var(--green);font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.15s">
+            ▲ BUY ${s}
+          </button>
+          <button onclick="dashTrade('sell')" style="padding:12px;background:linear-gradient(135deg,rgba(255,68,102,0.15),rgba(255,68,102,0.05));border:1px solid rgba(255,68,102,0.3);border-radius:12px;color:var(--red);font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.15s">
+            ▼ SELL ${s}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -1050,7 +1099,114 @@ function changeTF(tf) {
   drawChart('mainChart', selectedPair);
 }
 
-function quickTrade(type) { tradeMode = type; showTab('trade'); }
+function updateDashTradeVolume() {
+  const amt   = parseFloat(document.getElementById('dashTradeAmt')?.value) || 0;
+  const price = prices[selectedPair]?.price || 0;
+  const volEl = document.getElementById('dashTradeVol');
+  const s     = sym(selectedPair);
+  if (volEl && price && amt) {
+    volEl.textContent = '≈ ' + (amt/price).toFixed(price > 1000 ? 6 : 2) + ' ' + s;
+  }
+}
+
+async function dashTrade(type) {
+  const amt   = parseFloat(document.getElementById('dashTradeAmt')?.value);
+  if (!amt || amt <= 0) { showToast('Enter an amount first'); return; }
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  const price = prices[selectedPair]?.price;
+  if (!price) { showToast('No price data'); return; }
+  const volume = (amt / price).toFixed(8);
+  const s = sym(selectedPair);
+  if (!confirm(`${type.toUpperCase()} ${volume} ${s} for ≈ $${amt} AUD?`)) return;
+  try {
+    showToast(`Placing ${type} order...`);
+    const res = await api('/api/order/place', {
+      method:'POST',
+      body: JSON.stringify({ pair:selectedPair, type, ordertype:'market', volume, audAmount:amt })
+    });
+    showToast(`✅ ${type.toUpperCase()} order placed!`);
+    await refreshBalance();
+    await refreshPnL();
+    renderDashboard();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+let targetAllocation = {};
+
+async function saveAllocation() {
+  const syms = ['BTC','ETH','SOL','XRP','ADA','LTC','cash'];
+  const alloc = {};
+  let total = 0;
+  syms.forEach(s => {
+    const v = parseFloat(document.getElementById('alloc_'+s)?.value)||0;
+    if (v > 0) { alloc[s] = v; total += v; }
+  });
+  if (total > 100) { showToast('Total exceeds 100% — adjust values'); return; }
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  try {
+    await api('/api/allocation', { method:'POST', body:JSON.stringify(alloc) });
+    targetAllocation = alloc;
+    showToast(`✅ Targets saved (${total}% allocated)`);
+  } catch(e) { showToast('Error: '+e.message); }
+}
+
+async function checkAllocation() {
+  const el = document.getElementById('allocationResult');
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  if (el) el.innerHTML = `<div class="loading"><div class="spin"></div>Checking...</div>`;
+  try {
+    const res    = await api('/api/allocation/check');
+    const drifts = res.data?.drifts || [];
+    if (!drifts.length) {
+      if (el) el.innerHTML = `<div style="color:var(--green);font-size:12px;font-family:'Space Grotesk',sans-serif">✅ Portfolio is within 5% of all targets</div>`;
+    } else {
+      if (el) el.innerHTML = drifts.map(d => `
+        <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-family:'Space Grotesk',sans-serif;font-size:12px">
+          <span style="font-weight:700;color:${d.action==='REDUCE'?'var(--red)':'var(--green)'}">${d.action==='REDUCE'?'↓':'↑'} ${d.sym}</span>
+          <span style="color:var(--grey2)">${d.actualPct}% vs ${d.targetPct}% target</span>
+          <span style="color:${d.drift>=0?'var(--red)':'var(--green)'};font-weight:600">${d.drift>0?'+':''}${d.drift}%</span>
+        </div>`).join('');
+    }
+  } catch(e) { if (el) el.innerHTML = `<div style="color:var(--red);font-size:12px">${e.message}</div>`; }
+}
+
+// ── On-Chain Data ─────────────────────────────────────────────
+async function loadOnChain(sym) {
+  const el = document.getElementById('onchainPanel');
+  if (!el) return;
+  el.innerHTML = `<div class="loading"><div class="spin"></div>Fetching on-chain data for ${sym}...</div>`;
+  try {
+    const res = await api('/api/onchain/' + sym);
+    const d   = res.data;
+    const scoreCol = d.overallOnChainScore >= 7 ? 'var(--green)' : d.overallOnChainScore >= 4 ? 'var(--yellow)' : 'var(--red)';
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:700">${sym} On-Chain Health</div>
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:${scoreCol}">${d.overallOnChainScore}/10</div>
+      </div>
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:10px;line-height:1.6">${d.summary||''}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;margin-bottom:10px">
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:8px;padding:8px">
+          <div style="color:var(--grey2);margin-bottom:3px">Whale Activity</div>
+          <div style="color:var(--white);font-weight:600">${d.whaleActivity||'Unknown'}</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:8px;padding:8px">
+          <div style="color:var(--grey2);margin-bottom:3px">Exchange Flow</div>
+          <div style="color:var(--white);font-weight:600">${d.exchangeFlow||'Unknown'}</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:8px;padding:8px">
+          <div style="color:var(--grey2);margin-bottom:3px">Active Addresses</div>
+          <div style="color:var(--white);font-weight:600">${d.activeAddresses||'Unknown'}</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:8px;padding:8px">
+          <div style="color:var(--grey2);margin-bottom:3px">Network Health</div>
+          <div style="color:var(--white);font-weight:600">${d.networkHealth||'Unknown'}</div>
+        </div>
+      </div>
+      ${d.bullishSignals?.length ? `<div style="font-size:11px;color:var(--green);margin-bottom:4px">${d.bullishSignals.map(s=>'🟢 '+s).join('<br>')}</div>` : ''}
+      ${d.bearishSignals?.length ? `<div style="font-size:11px;color:var(--red)">${d.bearishSignals.map(s=>'🔴 '+s).join('<br>')}</div>` : ''}`;
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`; }
+}
 
 async function runAdvisorNow() {
   if (!serverOnline) { showToast('Server offline'); return; }
@@ -1108,36 +1264,180 @@ async function loadAISignal(pair) {
 }
 function refreshSignal() { loadAISignal(selectedPair); }
 
-// ── Chart ─────────────────────────────────────────────────────
-async function drawChart(canvasId, pair) {
+// ── Chart Engine v4.0 — Candlestick + Overlays ────────────────
+let chartOHLC    = []; // cached raw candles
+let chartOverlay = {}; // { avgBuyPrice, stopLossPrice, trades }
+let liveChartTimer = null;
+
+async function drawChart(canvasId, pair, opts = {}) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
-  let ohlc;
-  try { ohlc = (await api(`/api/ohlc?pair=${pair}&interval=${tfInt(chartTF)}`)).data; } catch(e) { ohlc=null; }
   const ctx = canvas.getContext('2d');
-  const dpr = window.devicePixelRatio||1;
-  const W = canvas.offsetWidth; const H = 110;
-  canvas.width=W*dpr; canvas.height=H*dpr; ctx.scale(dpr,dpr); canvas.style.height=H+'px';
-  const closes = (ohlc||[]).map(c=>parseFloat(c[4]));
-  if (!closes.length) { ctx.fillStyle='#333'; ctx.font='11px Space Grotesk'; ctx.fillText('No data',10,55); return; }
-  const mn=Math.min(...closes), mx=Math.max(...closes), rng=mx-mn||1;
-  const toY=v=>H-((v-mn)/rng)*(H-20)-10;
-  const toX=i=>(i/(closes.length-1))*W;
-  const rising = closes[closes.length-1] >= closes[0];
-  const lc = rising ? '#00C896' : '#FF4466';
-  const grd = ctx.createLinearGradient(0,0,0,H);
-  grd.addColorStop(0, rising?'rgba(0,200,150,0.15)':'rgba(255,68,102,0.15)');
-  grd.addColorStop(1,'rgba(0,0,0,0)');
-  ctx.beginPath(); ctx.moveTo(toX(0),toY(closes[0]));
-  for(let i=1;i<closes.length;i++) ctx.lineTo(toX(i),toY(closes[i]));
-  ctx.strokeStyle=lc; ctx.lineWidth=1.5; ctx.stroke();
-  ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath(); ctx.fillStyle=grd; ctx.fill();
-  // Last price line
-  const ly=toY(closes[closes.length-1]);
-  ctx.beginPath(); ctx.setLineDash([3,4]); ctx.moveTo(0,ly); ctx.lineTo(W,ly);
-  ctx.strokeStyle='rgba(0,212,255,0.2)'; ctx.lineWidth=1; ctx.stroke(); ctx.setLineDash([]);
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.offsetWidth;
+  const H   = opts.height || 140;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  ctx.scale(dpr, dpr); canvas.style.height = H + 'px';
+
+  // Fetch candles
+  let candles = [];
+  try {
+    const data = await api(`/api/ohlc?pair=${pair}&interval=${tfInt(chartTF)}`);
+    candles = data.data || [];
+    chartOHLC = candles;
+  } catch(e) {
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.font = '11px Space Grotesk';
+    ctx.fillText('No data', 10, H/2);
+    return;
+  }
+
+  if (!candles.length) return;
+
+  // Use last N candles that fit the width
+  const maxCandles = Math.min(Math.floor(W / 6), candles.length, 80);
+  const visible    = candles.slice(-maxCandles);
+
+  const highs  = visible.map(c => parseFloat(c[2]));
+  const lows   = visible.map(c => parseFloat(c[3]));
+  const mn     = Math.min(...lows)  * 0.999;
+  const mx     = Math.max(...highs) * 1.001;
+  const range  = mx - mn || 1;
+
+  const padT = 12, padB = 16;
+  const cH   = H - padT - padB;
+  const toY  = v => padT + cH - ((v - mn) / range) * cH;
+  const candW = W / visible.length;
+  const bodyW = Math.max(candW * 0.6, 2);
+
+  // Background grid lines
+  ctx.strokeStyle = 'rgba(0,212,255,0.05)';
+  ctx.lineWidth   = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (cH / 4) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // Draw candles
+  visible.forEach((c, i) => {
+    const open  = parseFloat(c[1]);
+    const high  = parseFloat(c[2]);
+    const low   = parseFloat(c[3]);
+    const close = parseFloat(c[4]);
+    const bull  = close >= open;
+    const x     = i * candW + candW / 2;
+    const col   = bull ? '#00C896' : '#FF4466';
+    const alpha = bull ? '0.85' : '0.85';
+
+    // Wick
+    ctx.beginPath();
+    ctx.strokeStyle = col;
+    ctx.lineWidth   = 1;
+    ctx.moveTo(x, toY(high));
+    ctx.lineTo(x, toY(low));
+    ctx.stroke();
+
+    // Body
+    const bodyTop = toY(Math.max(open, close));
+    const bodyBot = toY(Math.min(open, close));
+    const bH      = Math.max(bodyBot - bodyTop, 1);
+    ctx.fillStyle = col;
+    ctx.globalAlpha = parseFloat(alpha);
+    ctx.fillRect(x - bodyW/2, bodyTop, bodyW, bH);
+    ctx.globalAlpha = 1;
+  });
+
+  // Volume bars at bottom
+  const volumes = visible.map(c => parseFloat(c[6]));
+  const maxVol  = Math.max(...volumes) || 1;
+  const volH    = Math.min(cH * 0.15, 20);
+  volumes.forEach((v, i) => {
+    const c    = visible[i];
+    const bull = parseFloat(c[4]) >= parseFloat(c[1]);
+    const x    = i * candW;
+    const bh   = (v / maxVol) * volH;
+    ctx.fillStyle   = bull ? 'rgba(0,200,150,0.3)' : 'rgba(255,68,102,0.3)';
+    ctx.fillRect(x, H - padB - bh, Math.max(candW - 1, 1), bh);
+  });
+
+  // Overlay lines from P&L data
+  const sym = (DISPLAY[pair]||pair).replace('/AUD','');
+  const assetPnl = pnlData?.assetSummary?.find(a => a.sym === sym);
+  if (assetPnl?.avgBuyPrice) {
+    const avgY = toY(assetPnl.avgBuyPrice);
+    if (avgY > padT && avgY < H - padB) {
+      ctx.beginPath();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(0,212,255,0.7)';
+      ctx.lineWidth   = 1.5;
+      ctx.moveTo(0, avgY); ctx.lineTo(W, avgY); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(0,212,255,0.9)';
+      ctx.font      = 'bold 9px Space Grotesk';
+      ctx.fillText(`AVG BUY ${fmtAUDCompact(assetPnl.avgBuyPrice)}`, 4, avgY - 3);
+    }
+  }
+
+  // Stop-loss line
+  if (botCfg.stopLossEnabled && assetPnl?.avgBuyPrice) {
+    const slPrice = assetPnl.avgBuyPrice * (1 - botCfg.stopLossPct / 100);
+    const slY     = toY(slPrice);
+    if (slY > padT && slY < H - padB) {
+      ctx.beginPath();
+      ctx.setLineDash([3, 5]);
+      ctx.strokeStyle = 'rgba(255,68,102,0.6)';
+      ctx.lineWidth   = 1;
+      ctx.moveTo(0, slY); ctx.lineTo(W, slY); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,68,102,0.8)';
+      ctx.font      = 'bold 9px Space Grotesk';
+      ctx.fillText(`SL ${fmtAUDCompact(slPrice)}`, 4, slY - 3);
+    }
+  }
+
+  // Trade history dots
+  if (pnlData?.recentTrades) {
+    const pairTrades = pnlData.recentTrades
+      .filter(t => t.pair === pair)
+      .slice(-10);
+    pairTrades.forEach(t => {
+      const tPrice = t.price;
+      if (!tPrice) return;
+      const ty = toY(tPrice);
+      if (ty < padT || ty > H - padB) return;
+      // Find approximate x position based on timestamp
+      const tradeTime = new Date(t.timestamp).getTime() / 1000;
+      const firstTime = parseFloat(visible[0][0]);
+      const lastTime  = parseFloat(visible[visible.length-1][0]);
+      const timeRange = lastTime - firstTime || 1;
+      const tx = ((tradeTime - firstTime) / timeRange) * W;
+      if (tx < 0 || tx > W) return;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 4, 0, Math.PI * 2);
+      ctx.fillStyle   = t.type === 'buy' ? '#00C896' : '#FF4466';
+      ctx.fill();
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+    });
+  }
+
+  // Price label top right
+  const lastClose = parseFloat(visible[visible.length-1][4]);
+  const prevClose = parseFloat(visible[visible.length-2]?.[4] || visible[visible.length-1][1]);
+  const rising    = lastClose >= prevClose;
+  const ly        = toY(lastClose);
+  ctx.beginPath();
+  ctx.setLineDash([2,4]);
+  ctx.strokeStyle = 'rgba(0,212,255,0.25)';
+  ctx.lineWidth   = 1;
+  ctx.moveTo(0, ly); ctx.lineTo(W, ly); ctx.stroke();
+  ctx.setLineDash([]);
 }
-function tfInt(tf) { return {'15M':15,'1H':60,'4H':240,'1D':1440}[tf]||60; }
+
+function tfInt(tf) {
+  return { '1M':1,'5M':5,'15M':15,'1H':60,'4H':240,'1D':1440 }[tf] || 60;
+}
 
 // ── Trade Tab ─────────────────────────────────────────────────
 function renderTrade() {
@@ -1303,6 +1603,27 @@ function renderPortfolio() {
         </div>`).join('')}
     </div></div>` : ''}
 
+    <div class="section-label">Target Allocation<div class="section-head-line"></div></div>
+    <div class="card"><div class="card-body">
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:12px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
+        Set your target % per coin. Bot alerts when any position drifts more than 5% from target.
+      </div>
+      <div id="allocationGrid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+        ${['BTC','ETH','SOL','XRP','ADA','LTC','cash'].map(sym => `
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:700;color:${COLORS[sym]||'var(--grey1)'};min-width:36px">${sym}</span>
+            <input type="number" id="alloc_${sym}" min="0" max="100" value="${targetAllocation[sym]||0}"
+              style="flex:1;background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.15);color:#fff;padding:7px 10px;border-radius:8px;font-size:13px;font-family:'Space Grotesk',sans-serif;outline:none" placeholder="0">
+            <span style="font-size:11px;color:var(--grey2)">%</span>
+          </div>`).join('')}
+      </div>
+      <div class="row2">
+        <button class="btn btn-cyan" onclick="saveAllocation()">💾 Save Targets</button>
+        <button class="btn btn-ghost" onclick="checkAllocation()">⚖️ Check Drift</button>
+      </div>
+      <div id="allocationResult" style="margin-top:10px"></div>
+    </div></div>
+
     <div class="section-label">Australian Tax Export<div class="section-head-line"></div></div>
     <div class="card"><div class="card-body">
       <div style="font-size:12px;color:var(--grey1);margin-bottom:12px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
@@ -1323,7 +1644,7 @@ function renderPortfolio() {
     <div class="spacer"></div>
   </div>`;
 
-  setTimeout(() => { loadRecentTrades(); loadPnL(); loadPerformanceChart(); }, 80);
+  setTimeout(() => { loadRecentTrades(); loadPnL(); loadPerformanceChart(); loadAllocationData(); }, 80);
 }
 
 async function loadPnL() {
@@ -1447,6 +1768,21 @@ async function downloadTaxCSV() {
     a.click();
     showToast('✅ Tax CSV downloaded!');
   } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function loadAllocationData() {
+  if (!serverOnline || !cfg.botToken) return;
+  try {
+    const res = await api('/api/allocation');
+    if (res.data) {
+      targetAllocation = res.data;
+      // Update input fields if visible
+      Object.entries(res.data).forEach(([sym, pct]) => {
+        const el = document.getElementById('alloc_'+sym);
+        if (el) el.value = pct;
+      });
+    }
+  } catch(e) {}
 }
 
 async function loadRecentTrades() {
@@ -1640,6 +1976,12 @@ function renderBot() {
       <div class="field-label">Min Confidence (%)</div>
       <input class="input" id="botConfMin" type="number" value="${botCfg.confidenceMin}" min="60" max="99">
 
+      <div class="field-label">Minimum Hold Time (minutes)</div>
+      <input class="input" id="botMinHold" type="number" value="${botCfg.minHoldMinutes||60}" min="15" max="1440" placeholder="60">
+      <div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;margin-bottom:12px">
+        Bot will never sell within this many minutes of a buy. 60 min recommended.
+      </div>
+
       <div class="field-label">Risk Level</div>
       <select class="input" id="botRisk">
         <option value="conservative" ${botCfg.riskLevel==='conservative'?'selected':''}>Conservative — stronger signal required</option>
@@ -1727,11 +2069,73 @@ function renderBot() {
       🟢 <b style="color:var(--white)">Buy signals</b> — you get a YES/NO prompt on Telegram when RSI is oversold across timeframes.<br><br>
       <span style="color:var(--yellow)">⚠️ Holdings under your minimum value are completely ignored.</span>
     </div></div>
+
+    <!-- Backtesting Engine -->
+    <div class="section-label" style="margin-top:4px">Strategy Backtester<div class="section-head-line"></div></div>
+    <div class="card"><div class="card-body">
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:12px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
+        Test the current multi-indicator strategy against real historical data. See win rate, average profit per trade and total return.
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <select class="input" id="backtestPair" style="margin-bottom:0;flex:1">
+          ${PAIRS.map(p=>`<option value="${p}">${DISPLAY[p]||p}</option>`).join('')}
+        </select>
+        <select class="input" id="backtestDays" style="margin-bottom:0;width:90px">
+          <option value="7">7d</option>
+          <option value="14">14d</option>
+          <option value="30" selected>30d</option>
+          <option value="60">60d</option>
+        </select>
+      </div>
+      <button class="btn btn-cyan" onclick="runBacktest()" id="backtestBtn">▶ Run Backtest</button>
+      <div id="backtestResult" style="margin-top:12px"></div>
+    </div></div>
+
     <div class="spacer"></div>
   </div>`;
 
   loadBotStatus();
   loadDCAConfig();
+}
+
+async function runBacktest() {
+  const btn    = document.getElementById('backtestBtn');
+  const result = document.getElementById('backtestResult');
+  const pair   = document.getElementById('backtestPair')?.value || 'XBTAUD';
+  const days   = parseInt(document.getElementById('backtestDays')?.value) || 30;
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  if (btn) btn.textContent = '⏳ Running...';
+  if (result) result.innerHTML = `<div class="loading"><div class="spin"></div>Analysing ${days} days of data...</div>`;
+  try {
+    const res  = await api('/api/backtest', { method:'POST', body:JSON.stringify({ pair, days }) });
+    const d    = res.data;
+    const col  = d.totalReturn >= 0 ? 'var(--green)' : 'var(--red)';
+    if (result) result.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;color:${col}">${d.totalReturn>=0?'+':''}${d.totalReturn}%</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">Total Return</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;color:${d.winRate>=55?'var(--green)':'var(--yellow)'}">${d.winRate}%</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">Win Rate</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700">${d.totalTrades}</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">Trades</div>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;line-height:1.6">
+        ${d.wins} wins · ${d.losses} losses · Avg P&L per trade: ${d.avgPnlPct>=0?'+':''}${d.avgPnlPct}%<br>
+        Analysis period: ${days} days · ${d.candleCount} candles analysed
+        ${d.inPosition ? `<br><span style="color:var(--yellow)">⚡ Currently in position · buy at ${fmtAUD(d.buyPrice)}</span>` : ''}
+      </div>
+      ${d.winRate < 50 ? `<div style="margin-top:8px;padding:8px;background:rgba(255,184,0,0.06);border:1px solid rgba(255,184,0,0.2);border-radius:8px;font-size:11px;color:var(--yellow);font-family:'Space Grotesk',sans-serif">⚠️ Win rate below 50% — consider adjusting confidence threshold in bot settings</div>` : ''}
+      ${d.winRate >= 60 ? `<div style="margin-top:8px;padding:8px;background:rgba(0,200,150,0.06);border:1px solid rgba(0,200,150,0.2);border-radius:8px;font-size:11px;color:var(--green);font-family:'Space Grotesk',sans-serif">✅ Strategy performing well on ${DISPLAY[pair]||pair} over ${days} days</div>` : ''}`;
+  } catch(e) {
+    if (result) result.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`;
+  }
+  if (btn) btn.textContent = '▶ Run Backtest';
 }
 
 function setSellPct(p) {
@@ -1829,6 +2233,7 @@ async function saveBotConfig() {
   botCfg.riskLevel          = document.getElementById('botRisk')?.value||'conservative';
   botCfg.minHoldingValueAUD = parseInt(document.getElementById('botMinHolding')?.value)||50;
   botCfg.stopLossPct        = parseFloat(document.getElementById('stopLossPct')?.value)||8;
+  botCfg.minHoldMinutes     = parseInt(document.getElementById('botMinHold')?.value)||60;
   if(!serverOnline){ showToast('Server offline'); return; }
   try {
     await api('/api/bot/config',{method:'POST',body:JSON.stringify(botCfg)});
@@ -1899,7 +2304,7 @@ function renderSettings() {
       </div>
       <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:6px;margin-top:2px">
         <span style="color:var(--grey2)">Version</span>
-        <span style="color:var(--grey2)">KRAKN·AI v3.1</span>
+        <span style="color:var(--grey2)">KRAKN·AI v4.0</span>
       </div>
     </div></div>
 
@@ -1970,6 +2375,7 @@ async function init() {
       }
       if (advRes?.data) Object.assign(advisorCfg, advRes.data);
       if (dcaRes?.data) Object.assign(dcaCfg, dcaRes.data);
+      try { const ar = await api('/api/allocation'); if (ar.data) targetAllocation = ar.data; } catch(e) {}
     } catch(e) { console.warn('Could not load settings from server:', e.message); }
   }
   renderDashboard();
