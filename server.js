@@ -1,5 +1,5 @@
 /**
- * KRAKN·AI — Trading Bot Backend Server v3.3
+ * KRAKN·AI — Trading Bot Backend Server v4.0
  * =============================================
  * Phase 1: P&L tracking, multi-indicator signals, stop-loss, multi-timeframe
  * Phase 2: Persistent settings, Fear & Greed, trailing stop-loss, DCA bot
@@ -149,7 +149,11 @@ let botConfig = {
   stopLossEnabled:    true,
   stopLossPct:        8,
   trailingStop:       false,
+  minHoldMinutes:     60,  // never sell within 60 minutes of buying
 };
+
+// Track when each coin was last bought so we enforce minimum hold time
+let lastBuyTimes = {}; // { sym: timestamp }
 let botState = {
   running:     false,
   lastSignals: {},
@@ -160,6 +164,13 @@ let botState = {
 
 // ─── Portfolio History ─────────────────────────────────────────
 let portfolioHistory = []; // [{ date, valueAUD, timestamp }]
+
+// ─── Target Allocation ─────────────────────────────────────────
+// User sets desired % per coin — bot alerts when drifting > 5%
+let targetAllocation = {}; // { BTC: 40, ETH: 30, SOL: 20, cash: 10 }
+
+// ─── On-Chain Data Cache ───────────────────────────────────────
+let onChainCache = {}; // { sym: { data, fetchedAt } }
 
 // ─── Stop-Loss Peaks ──────────────────────────────────────────
 let stopLossPeaks = {};
@@ -184,7 +195,8 @@ function saveData() {
       advisorSettings, botConfig, dcaConfig,
       priceAlerts, tradeLog: tradeLog.slice(-500),
       pnlByAsset, stopLossPeaks, portfolioHistory,
-      botRunning: botState.running, // persist whether bot was on
+      lastBuyTimes, targetAllocation,
+      botRunning: botState.running,
       savedAt: new Date().toISOString(),
     };
     const json = JSON.stringify(data, null, 2);
@@ -212,7 +224,9 @@ function loadData() {
       if (data.tradeLog)        tradeLog      = data.tradeLog;
       if (data.pnlByAsset)      pnlByAsset      = data.pnlByAsset;
       if (data.stopLossPeaks)   stopLossPeaks   = data.stopLossPeaks;
-      if (data.portfolioHistory) portfolioHistory = data.portfolioHistory;
+      if (data.portfolioHistory)  portfolioHistory  = data.portfolioHistory;
+      if (data.lastBuyTimes)      lastBuyTimes      = data.lastBuyTimes;
+      if (data.targetAllocation)  targetAllocation  = data.targetAllocation;
       // Auto-restart bot if it was running before the server restarted
       if (data.botRunning) {
         console.log('[LOAD] Bot was running before restart — will auto-start in 5s');
@@ -886,9 +900,10 @@ async function computeSignalForPair(pair) {
       analyseTimeframe(pair, 240),
     ]);
 
-    // Weight: 15min=1, 1hr=2, 4hr=3 (longer timeframes matter more)
-    const weightedScore = (tf15.score * 1) + (tf60.score * 2) + (tf240.score * 3);
-    const maxScore      = 21; // max possible weighted score
+    // Weights: 15min reduced to 0.5 (was 1) to prevent short-timeframe noise
+    // 1hr = 2, 4hr = 4 (was 3) — longer timeframes matter much more
+    const weightedScore = (tf15.score * 0.5) + (tf60.score * 2) + (tf240.score * 4);
+    const maxScore      = 26; // updated max possible weighted score
 
     // Determine action
     let action = 'HOLD', confidence = 50;
@@ -1431,7 +1446,12 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       const order       = await krakenPrivateRequest('AddOrder', {
         pair: opp.pair, type: 'buy', ordertype: 'market', volume: freshVolume,
       });
-      const valueAUD   = (parseFloat(freshVolume) * freshPrice).toFixed(2);
+      const valueAUD = (parseFloat(freshVolume) * freshPrice).toFixed(2);
+
+      // ── Record buy immediately for P&L and hold time ──────
+      recordTrade(opp.pair, opp.sym, 'buy', freshVolume, freshPrice, 'manual-yes');
+      lastBuyTimes[opp.sym] = Date.now(); // enforce minimum hold time from now
+
       const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
       await sendTelegramTo(chatId,
         `🟢 <b>BUY ORDER PLACED!</b>\n\n` +
@@ -1439,7 +1459,8 @@ async function handleTelegramMessage(chatId, userMessage, username) {
         `Bought: ${freshVolume} ${opp.sym}\n` +
         `Price: ${fmtAUDServer(freshPrice)}\n` +
         `Total: ≈ ${fmtAUDServer(parseFloat(valueAUD))}\n` +
-        `TXID: ${order.txid?.join(', ')}\n\n` +
+        `TXID: ${order.txid?.join(', ')}\n` +
+        `⏱ Min hold: ${botConfig.minHoldMinutes} minutes\n\n` +
         `⏰ ${sydneyTime} AEST\n\nGood luck! 🚀`
       );
     } catch(orderErr) {
@@ -1555,7 +1576,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({
-    status: 'online', version: '3.3',
+    status: 'online', version: "4.0",
     keysConfigured: !!(KRAKEN_API_KEY && KRAKEN_API_SECRET),
     aiConfigured: !!(process.env.ANTHROPIC_API_KEY),
     telegramConfigured: !!(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID),
@@ -1760,7 +1781,7 @@ app.delete('/api/alerts/:id', requireAuth, (req, res) => {
 app.post('/api/telegram/test', requireAuth, async (req, res) => {
   try {
     const result = await sendTelegram(
-      '🤖 <b>KRAKN·AI v3.3 Connected!</b>\n\n' +
+      '🤖 <b>KRAKN·AI v4.0 Connected!</b>\n\n' +
       '✅ Telegram notifications working!\n\n' +
       'You will receive:\n' +
       '📊 Scheduled AI market analysis\n' +
@@ -2117,6 +2138,17 @@ async function runAutoSellCheck() {
         continue;
       }
 
+      // ── Minimum Hold Time Check ───────────────────────────
+      // Never sell within minHoldMinutes of buying — prevents churn on noise
+      const lastBought = lastBuyTimes[holding.sym];
+      if (lastBought) {
+        const heldMinutes = (Date.now() - lastBought) / 1000 / 60;
+        if (heldMinutes < botConfig.minHoldMinutes) {
+          console.log(`[AUTO-SELL BOT] ${dp} — hold time enforced (${heldMinutes.toFixed(0)}/${botConfig.minHoldMinutes} min)`);
+          continue;
+        }
+      }
+
       // ── Stop-Loss Check ───────────────────────────────────
       const pnl = getUnrealisedPnl(holding.sym, ticker.price, holding.qty);
       if (botConfig.stopLossEnabled && pnl.avgBuyPrice > 0) {
@@ -2363,6 +2395,7 @@ async function runDCA() {
         });
 
         recordTrade(pair, sym, 'buy', volume, ticker.price, 'dca');
+        lastBuyTimes[sym] = Date.now(); // enforce hold time after DCA buy
         dcaConfig.totalSpent += amountPerCoin;
         results.push({ dp, volume, price: ticker.price, value: amountPerCoin, txid: order.txid });
         console.log(`[DCA] ✅ Bought ${volume} ${sym} @ ${fmtAUDServer(ticker.price)}`);
@@ -2394,11 +2427,215 @@ async function runDCA() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// v4.0: BACKTESTING ENGINE
+// Runs current multi-indicator strategy over historical OHLC data
+// ══════════════════════════════════════════════════════════════
+app.post('/api/backtest', requireAuth, async (req, res) => {
+  try {
+    const { pair = 'XBTAUD', days = 30 } = req.body;
+    const interval  = 60; // 1hr candles for backtesting
+    const dp        = PAIR_DISPLAY[pair] || pair;
+
+    // Fetch enough candles — 30 days * 24 hrs = 720 candles
+    const ohlc    = await krakenPublicRequest('OHLC', { pair, interval });
+    const k       = Object.keys(ohlc).find(k => k !== 'last');
+    const allCandles = ohlc[k];
+
+    // Limit to requested days
+    const candlesNeeded = days * 24;
+    const candles       = allCandles.slice(-Math.min(candlesNeeded + 50, allCandles.length));
+
+    const trades    = [];
+    let inPosition  = false;
+    let buyPrice    = 0;
+    let buyTime     = null;
+    let wins = 0, losses = 0, totalPnlPct = 0;
+
+    // Simulate strategy candle by candle (walk-forward)
+    for (let i = 50; i < candles.length - 1; i++) {
+      const window = candles.slice(0, i + 1);
+      const closes  = window.map(c => parseFloat(c[4]));
+      const volumes = window.map(c => parseFloat(c[6]));
+      const price   = closes[closes.length - 1];
+      const time    = new Date(candles[i][0] * 1000).toISOString();
+
+      const rsi     = calcRSI(closes);
+      const macd    = calcMACD(closes);
+      const bb      = calcBollingerBands(closes);
+      const volSig  = calcVolumeSignal(volumes, closes);
+      const patterns = detectCandlePatterns(window.slice(-5));
+
+      // Score (simplified single timeframe for backtest speed)
+      let score = 0;
+      if (rsi < 30) score += 2; else if (rsi < 45) score += 1;
+      else if (rsi > 70) score -= 2; else if (rsi > 55) score -= 1;
+      if (macd.trend === 'BULLISH') score += 1; else if (macd.trend === 'BEARISH') score -= 1;
+      if (bb.position === 'OVERSOLD') score += 2; else if (bb.position === 'OVERBOUGHT') score -= 2;
+      if (volSig === 'STRONG_BUY') score += 2; else if (volSig === 'STRONG_SELL') score -= 2;
+      score += scorePatterns(patterns).score * 0.5;
+
+      if (!inPosition && score >= 4) {
+        // BUY signal
+        inPosition = true;
+        buyPrice   = price;
+        buyTime    = time;
+        trades.push({ type:'BUY', price, time, score: Math.round(score), rsi });
+      } else if (inPosition && (score <= -4 || rsi > 70)) {
+        // SELL signal
+        inPosition = false;
+        const pnlPct = ((price - buyPrice) / buyPrice) * 100;
+        totalPnlPct += pnlPct;
+        if (pnlPct > 0) wins++; else losses++;
+        trades.push({ type:'SELL', price, time, score: Math.round(score), rsi,
+          pnlPct: parseFloat(pnlPct.toFixed(2)),
+          buyPrice: parseFloat(buyPrice.toFixed(2)) });
+        buyPrice = 0;
+      }
+    }
+
+    const totalTrades = wins + losses;
+    const winRate     = totalTrades > 0 ? ((wins / totalTrades) * 100) : 0;
+    const avgPnl      = totalTrades > 0 ? (totalPnlPct / totalTrades) : 0;
+
+    // Current price for unrealised if still in position
+    const lastCandle  = candles[candles.length - 1];
+    const lastPrice   = parseFloat(lastCandle[4]);
+    const unrealised  = inPosition ? ((lastPrice - buyPrice) / buyPrice) * 100 : 0;
+    const totalReturn = totalPnlPct + unrealised;
+
+    res.json({ success: true, data: {
+      pair: dp, days, interval,
+      totalTrades, wins, losses,
+      winRate:     parseFloat(winRate.toFixed(1)),
+      avgPnlPct:   parseFloat(avgPnl.toFixed(2)),
+      totalReturn: parseFloat(totalReturn.toFixed(2)),
+      inPosition, buyPrice: inPosition ? buyPrice : null,
+      trades: trades.slice(-50), // last 50 trades
+      candleCount: candles.length,
+    }});
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
+// v4.0: TARGET ALLOCATION
+// ══════════════════════════════════════════════════════════════
+app.get('/api/allocation', requireAuth, (req, res) => {
+  res.json({ success: true, data: targetAllocation });
+});
+
+app.post('/api/allocation', requireAuth, (req, res) => {
+  Object.assign(targetAllocation, req.body);
+  saveData();
+  res.json({ success: true, data: targetAllocation });
+});
+
+app.get('/api/allocation/check', requireAuth, requireKeys, async (req, res) => {
+  try {
+    if (!Object.keys(targetAllocation).length) {
+      return res.json({ success: true, data: { drifts: [], message: 'No target allocation set' } });
+    }
+    const bal  = await krakenPrivateRequest('Balance');
+    let total  = 0;
+    const vals = {};
+
+    for (const [asset, qty] of Object.entries(bal)) {
+      const q = parseFloat(qty);
+      if (q <= 0) continue;
+      if (['ZAUD','AUD','AUDX'].includes(asset)) { vals['cash'] = (vals['cash']||0) + q; total += q; continue; }
+      const sym  = asset.replace(/^X/,'').replace(/^Z/,'').replace('XBT','BTC');
+      const pair = sym === 'BTC' ? 'XBTAUD' : sym+'AUD';
+      try {
+        const tick = await fetchSingleTicker(pair);
+        if (tick) { const v = q * tick.price; vals[sym] = v; total += v; }
+      } catch(e) {}
+    }
+
+    const drifts = [];
+    for (const [sym, targetPct] of Object.entries(targetAllocation)) {
+      const actualVal  = vals[sym] || 0;
+      const actualPct  = total > 0 ? (actualVal / total) * 100 : 0;
+      const drift      = actualPct - targetPct;
+      if (Math.abs(drift) >= 5) {
+        drifts.push({
+          sym, targetPct, actualPct: parseFloat(actualPct.toFixed(1)),
+          drift: parseFloat(drift.toFixed(1)),
+          action: drift > 0 ? 'REDUCE' : 'INCREASE',
+          valueAUD: parseFloat(actualVal.toFixed(2)),
+        });
+      }
+    }
+
+    // Alert via Telegram if any significant drift
+    if (drifts.length > 0) {
+      const msg = `⚖️ <b>Portfolio Allocation Drift!</b>\n\n` +
+        drifts.map(d => `${d.action === 'REDUCE' ? '🔴' : '🟢'} <b>${d.sym}</b>: ${d.actualPct}% vs target ${d.targetPct}% (${d.drift > 0 ? '+' : ''}${d.drift}%)`).join('\n') +
+        `\n\nTotal portfolio: ${fmtAUDServer(total)}`;
+      sendTelegram(msg);
+    }
+
+    res.json({ success: true, data: { drifts, total, values: vals } });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
+// v4.0: ON-CHAIN DATA
+// Whale movements, exchange flows, network health via Claude web search
+// ══════════════════════════════════════════════════════════════
+app.get('/api/onchain/:sym', requireAuth, async (req, res) => {
+  try {
+    const sym     = req.params.sym.toUpperCase();
+    const cached  = onChainCache[sym];
+
+    // Cache for 2 hours
+    if (cached && (Date.now() - cached.fetchedAt) < 2 * 60 * 60 * 1000) {
+      return res.json({ success: true, data: cached.data, cached: true });
+    }
+
+    const prompt = `Search for current on-chain data and network metrics for ${sym} cryptocurrency.
+Find: 1) Large whale transactions in last 24h 2) Exchange inflows/outflows 3) Active addresses trend 4) Network hash rate or validator count 5) Any unusual on-chain activity.
+
+Return ONLY this JSON (no markdown):
+{
+  "whaleActivity": "brief description of large transactions",
+  "exchangeFlow": "net inflow or outflow from exchanges",
+  "activeAddresses": "trend up/down/stable with number if available",
+  "networkHealth": "strong/moderate/weak with brief reason",
+  "bullishSignals": ["signal1", "signal2"],
+  "bearishSignals": ["signal1", "signal2"],
+  "overallOnChainScore": 6,
+  "summary": "one sentence overall assessment"
+}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'x-api-key':process.env.ANTHROPIC_API_KEY, 'anthropic-version':'2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 600,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const raw  = await response.json();
+    const text = (raw.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    const clean = text.replace(/```json|```/g, '').trim();
+    const data  = JSON.parse(clean);
+
+    onChainCache[sym] = { data, fetchedAt: Date.now() };
+    console.log(`[ON-CHAIN] ${sym}: score ${data.overallOnChainScore}/10`);
+    res.json({ success: true, data });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Start Server ──────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('');
   console.log('╔════════════════════════════════════════╗');
-  console.log('║        KRAKN·AI Bot Server v3.3        ║');
+  console.log('║        KRAKN·AI Bot Server v4.0        ║');
   console.log('╠════════════════════════════════════════╣');
   console.log(`║  Port:     ${PORT}                         ║`);
   console.log(`║  Currency: 🇦🇺 AUD                     ║`);
