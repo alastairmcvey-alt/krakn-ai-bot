@@ -67,8 +67,8 @@ const TELEGRAM_TOKEN    = (process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(
 const TELEGRAM_CHAT_ID  = (process.env.TELEGRAM_CHAT_ID  || '').trim().replace(/[\r\n]/g, '');
 
 // ─── Multi-Currency Pair Config ────────────────────────────────
-// AUD pairs — your home currency
-const AUD_PAIRS = ['XBTAUD','ETHAUD','XRPAUD','ADAAUD','SOLAUD','LTCAUD','DOTAUD','LINKAUD'];
+// AUD pairs — your home currency (DOTAUD removed — not supported on Kraken AUD)
+const AUD_PAIRS = ['XBTAUD','ETHAUD','XRPAUD','ADAAUD','SOLAUD','LTCAUD','LINKAUD'];
 
 // USD pairs — unlocks 50+ additional coins
 const USD_PAIRS = [
@@ -163,7 +163,7 @@ const MIN_VOLUMES = {
 let advisorSettings = {
   enabled:       true,
   intervalHours: 1,
-  pairs:         ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','DOTAUD','LINKAUD'],
+  pairs:         ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','LINKAUD'],
   minConfidence: 65,
   includeNews:   true,
   lastRun:       null,
@@ -1030,11 +1030,16 @@ async function computeSignalForPair(pair) {
           { key:'1w',  interval:10080,candles:20,  weight:2.0, label:'Weekly' },
         ];
 
-        // Fetch and analyse all timeframes in parallel
-        const visionResults = await Promise.allSettled(
-          tfConfigs.map(async tf => {
+        // Fetch and analyse all timeframes SEQUENTIALLY with delays
+        // Prevents overwhelming the Claude API with 40 simultaneous calls
+        const visionResults = [];
+        for (const tf of tfConfigs) {
+          try {
+            // Small delay between each timeframe to avoid rate limits
+            if (visionResults.length > 0) await new Promise(r => setTimeout(r, 800));
             const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: tf.interval });
             const k       = Object.keys(ohlc).find(k => k !== 'last');
+            if (!k) continue;
             const candles = ohlc[k].slice(-tf.candles);
             const result  = await analyseChartWithVision(pair, candles, {
               rsi:           tf.key === '1h' ? tf60.rsi : tf.key === '4h' ? tf240.rsi : tf60.rsi,
@@ -1043,9 +1048,11 @@ async function computeSignalForPair(pair) {
               weightedScore: Math.round(weightedScore),
               timeframe:     tf.label,
             });
-            return { ...tf, result };
-          })
-        );
+            if (result) visionResults.push({ ...tf, result, status:'fulfilled' });
+          } catch(e) {
+            console.warn(`[VISION ${tf.key}] ${PAIR_DISPLAY[pair]||pair}:`, e.message);
+          }
+        }
 
         // Collect results and compute weighted vision score
         let visionScoreSum  = 0;
@@ -1054,8 +1061,8 @@ async function computeSignalForPair(pair) {
         const visionSignals = [];
 
         visionResults.forEach(r => {
-          if (r.status !== 'fulfilled' || !r.value?.result) return;
-          const { key, label, weight, result } = r.value;
+          if (!r?.result) return;
+          const { key, label, weight, result } = r;
           visionAll[key] = result;
 
           // Accumulate weighted visual score (-5 to +5 per TF)
@@ -1257,14 +1264,25 @@ async function runAdvisor() {
       ? `\nFear & Greed Index: ${fearGreed.value}/100 (${fearGreed.label})${fearGreed.value <= 25 ? ' — Extreme Fear' : fearGreed.value >= 75 ? ' — Extreme Greed' : ''}`
       : '';
 
-    // Sprint 1: Add sentiment scores and patterns for each coin
-    const enrichedMarket = await Promise.all(marketData.map(async d => {
-      const sym       = d.displayPair.replace('/AUD','');
-      const sentiment = await fetchSentimentScore(sym);
-      const signal    = await computeSignalForPair(d.pair);
-      const topPat    = signal.patterns?.[0];
-      return { ...d, sentiment, signal, topPattern: topPat };
-    }));
+    // Sprint 1: Add sentiment scores and signals sequentially (not parallel)
+    // This prevents overwhelming Claude API with simultaneous requests
+    const enrichedMarket = [];
+    for (const d of marketData) {
+      try {
+        const sym       = (d.displayPair||PAIR_DISPLAY[d.pair]||d.pair).replace('/AUD','').replace('/USD','');
+        const sentiment = await fetchSentimentScore(sym);
+        // Stagger between coins to avoid rate limits
+        await new Promise(r => setTimeout(r, 500));
+        const signal    = await computeSignalForPair(d.pair);
+        const topPat    = signal.patterns?.[0];
+        enrichedMarket.push({ ...d, sentiment, signal, topPattern: topPat });
+        // Brief pause between full signal computations
+        await new Promise(r => setTimeout(r, 1000));
+      } catch(e) {
+        console.warn(`[ADVISOR] Failed to enrich ${d.pair}:`, e.message);
+        enrichedMarket.push({ ...d, sentiment:{ score:0, label:'Unknown' }, signal:{ action:'HOLD', confidence:50, rsi:50, weightedScore:0, signals:[] }, topPattern:null });
+      }
+    }
 
     const marketSummary = enrichedMarket.map(d =>
       `${d.displayPair}: ${fmtAUDServer(d.price)} (${d.change24h > 0 ? '+' : ''}${d.change24h}% 24h)\n` +
@@ -1739,20 +1757,24 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       const fgStr     = fearGreed.value ? `😱 Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label})\n\n` : '';
       const results   = [];
 
-      for (const pair of getActivePairs(botConfig.currencyMode)) { // scan ALL pairs
+      // Limit to 4 pairs in Telegram scan to avoid timeout
+      const scanPairs = getActivePairs(botConfig.currencyMode).slice(0, 4);
+
+      for (const pair of scanPairs) {
         try {
           const signal  = await computeSignalForPair(pair);
+          await new Promise(r => setTimeout(r, 500)); // stagger
           const ticker  = await fetchSingleTicker(pair);
           const dp      = PAIR_DISPLAY[pair] || pair;
-          const sym     = dp.replace('/AUD','');
-          const sent    = sentimentCache[sym] || await fetchSentimentScore(sym);
+          const sym     = dp.replace('/AUD','').replace('/USD','');
+          const sent    = sentimentCache[sym] || { score:0, label:'Unknown' };
           const topPat  = signal.patterns?.[0];
 
           const emoji   = signal.action === 'BUY'  ? '🟢' :
                           signal.action === 'SELL' ? '🔴' : '🟡';
 
           results.push(
-            `${emoji} <b>${dp}</b> — ${fmtAUDServer(ticker?.price || 0)}\n` +
+            `${emoji} <b>${dp}</b> — ${fmtAUDServer(ticker?.price || 0, pair)}\n` +
             `${signal.action} ${signal.confidence}% | Score: ${signal.weightedScore} | RSI: ${signal.rsi}\n` +
             `Sentiment: ${sent.score}/10 (${sent.label})\n` +
             (topPat ? `Pattern: ${topPat.name} — ${topPat.signal}\n` : '') +
@@ -1761,19 +1783,11 @@ async function handleTelegramMessage(chatId, userMessage, username) {
         } catch(e) { console.warn(`[SIGNAL SCAN] ${pair}:`, e.message); }
       }
 
-      const hasStrong = results.some((_, i) => {
-        const s = advisorSettings.pairs[i];
-        return s && botState.lastSignals[s]?.confidence >= advisorSettings.minConfidence;
-      });
-
       const summary = results.length
-        ? `🤖 <b>KRAKN·AI Signal Scan</b>\n\n${fgStr}${results.join('\n\n')}\n\n` +
-          (hasStrong ? '💡 Strong signal found — check the YES/NO prompt above!' : '💡 No strong buy/sell signals right now. Watching...')
+        ? `🤖 <b>KRAKN·AI Signal Scan</b>\n\n${fgStr}${results.join('\n\n')}\n\n💡 Checking for buy opportunities...`
         : '⚠️ Could not fetch signals. Try again in a moment.';
 
       await sendTelegramTo(chatId, summary);
-
-      // Also trigger buy check — will send YES/NO if opportunity found
       await checkBuyOpportunity();
 
     } catch(e) {
