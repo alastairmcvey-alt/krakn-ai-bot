@@ -572,8 +572,8 @@ select.input{ cursor:pointer; }
     <button class="nav-btn" onclick="showTab('portfolio')" id="nav-portfolio">
       <div class="nav-icon">◫</div><div class="nav-label">Portfolio</div>
     </button>
-    <button class="nav-btn" onclick="showTab('alerts')" id="nav-alerts">
-      <div class="nav-icon">◎</div><div class="nav-label">Alerts</div>
+    <button class="nav-btn" onclick="showTab('smartmoney')" id="nav-smartmoney">
+      <div class="nav-icon">🐋</div><div class="nav-label">Whales</div>
     </button>
     <button class="nav-btn" onclick="showTab('bot')" id="nav-bot">
       <div class="nav-icon">⟳</div><div class="nav-label">Auto-Sell</div>
@@ -594,7 +594,7 @@ let serverOnline   = false;
 let aiCache        = {};
 let advisorCfg     = { enabled:true, intervalHours:1, minConfidence:65, includeNews:true };
 let botActive      = false;
-let botCfg         = { sellPct:100, confidenceMin:75, riskLevel:'conservative', minHoldingValueAUD:50, stopLossEnabled:true, stopLossPct:8, trailingStop:false };
+let botCfg = { sellPct:100, confidenceMin:75, riskLevel:'conservative', minHoldingValueAUD:50, stopLossEnabled:true, stopLossPct:8, trailingStop:false, minHoldMinutes:60, autoBuy:false, autoBuyMinConfidence:82, autoBuyMaxAUD:200 };
 let botLastSignals = {};
 let dcaCfg         = { enabled:false, pairs:['XBTAUD'], amountAUD:50, frequency:'weekly', totalSpent:0, lastRun:null };
 let pnlData        = null; // cached P&L from server
@@ -606,31 +606,78 @@ let cfg = {
 
 let prices = {}, balance = {}, openOrders = {}, myAlerts = [];
 
-const PAIRS   = ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','DOTAUD','LINKAUD'];
-const DISPLAY = { XBTAUD:'BTC/AUD', ETHAUD:'ETH/AUD', SOLAUD:'SOL/AUD', XRPAUD:'XRP/AUD', ADAAUD:'ADA/AUD', LTCAUD:'LTC/AUD', DOTAUD:'DOT/AUD', LINKAUD:'LINK/AUD' };
-const COLORS  = { BTC:'#F7931A', ETH:'#627EEA', SOL:'#9945FF', XRP:'#346AA9', ADA:'#0D9488', LTC:'#BFBBBB', DOT:'#E6007A', LINK:'#2A5ADA' };
-const ICONS   = { BTC:'₿', ETH:'Ξ', SOL:'◎', XRP:'✕', ADA:'₳', LTC:'Ł', DOT:'●', LINK:'⬡' };
+// ── Currency config ────────────────────────────────────────────
+let currencyMode = localStorage.getItem('currencyMode') || 'AUD';
 
-function sym(pair)  { return (DISPLAY[pair]||pair).replace('/AUD',''); }
+const AUD_PAIRS_LIST = ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','DOTAUD','LINKAUD'];
+const USD_PAIRS_LIST = [
+  'XBTUSD','ETHUSD','SOLUSD','XRPUSD','ADAUSD','LTCUSD','DOTUSD','LINKUSD',
+  'MATICUSD','AVAXUSD','ATOMUSD','UNIUSD','AAVEUSD','DOGEUSD',
+  'OPUSD','ARBUSD','INJUSD','SUIUSD','APTUSD','NEARUSD','FTMUSD','ALGOUSD',
+];
+
+function getActivePairs() {
+  if (currencyMode === 'USD')  return USD_PAIRS_LIST;
+  if (currencyMode === 'BOTH') return [...AUD_PAIRS_LIST, ...USD_PAIRS_LIST];
+  return AUD_PAIRS_LIST;
+}
+// PAIRS is now dynamic
+let PAIRS = getActivePairs();
+
+const DISPLAY = {
+  XBTAUD:'BTC/AUD', ETHAUD:'ETH/AUD', SOLAUD:'SOL/AUD', XRPAUD:'XRP/AUD',
+  ADAAUD:'ADA/AUD', LTCAUD:'LTC/AUD', DOTAUD:'DOT/AUD', LINKAUD:'LINK/AUD',
+  XBTUSD:'BTC/USD', ETHUSD:'ETH/USD', SOLUSD:'SOL/USD', XRPUSD:'XRP/USD',
+  ADAUSD:'ADA/USD', LTCUSD:'LTC/USD', DOTUSD:'DOT/USD', LINKUSD:'LINK/USD',
+  MATICUSD:'MATIC/USD', AVAXUSD:'AVAX/USD', ATOMUSD:'ATOM/USD', UNIUSD:'UNI/USD',
+  AAVEUSD:'AAVE/USD',   DOGEUSD:'DOGE/USD', OPUSD:'OP/USD',   ARBUSD:'ARB/USD',
+  INJUSD:'INJ/USD',     SUIUSD:'SUI/USD',   APTUSD:'APT/USD', NEARUSD:'NEAR/USD',
+  FTMUSD:'FTM/USD',     ALGOUSD:'ALGO/USD',
+};
+
+const COLORS = {
+  BTC:'#F7931A', ETH:'#627EEA', SOL:'#9945FF', XRP:'#346AA9',
+  ADA:'#0D9488', LTC:'#BFBBBB', DOT:'#E6007A', LINK:'#2A5ADA',
+  MATIC:'#8247E5', AVAX:'#E84142', ATOM:'#2E3148', UNI:'#FF007A',
+  AAVE:'#B6509E', DOGE:'#C2A633', OP:'#FF0420', ARB:'#28A0F0',
+  INJ:'#00C2FF',  SUI:'#6FBCF0', APT:'#00BFA5', NEAR:'#00EC97',
+  FTM:'#1969FF',  ALGO:'#00B4D8',
+};
+const ICONS = {
+  BTC:'₿', ETH:'Ξ', SOL:'◎', XRP:'✕', ADA:'₳', LTC:'Ł', DOT:'●', LINK:'⬡',
+  MATIC:'⬡', AVAX:'△', ATOM:'⚛', UNI:'🦄', AAVE:'👻', DOGE:'Ð',
+  OP:'⭕', ARB:'🔵', INJ:'💧', SUI:'💧', APT:'⬡', NEAR:'🌈', FTM:'👻', ALGO:'◆',
+};
+
+function pairCurrency(pair) {
+  return pair?.endsWith('USD') || pair?.endsWith('USDT') ? 'USD' : 'AUD';
+}
+function sym(pair)  { return (DISPLAY[pair]||pair).replace('/AUD','').replace('/USD',''); }
 function coin(pair) { return sym(pair); }
 
-function fmtAUD(p) {
+function fmtAUD(p, pair) {
+  const curr   = pair ? pairCurrency(pair) : (currencyMode === 'USD' ? 'USD' : 'AUD');
+  const symbol = curr === 'USD' ? 'US$' : 'A$';
   if (p === null || p === undefined || isNaN(p)) return '--';
-  if (p >= 10000) return '$' + Math.round(p).toLocaleString('en-AU');
-  if (p >= 100)   return '$' + p.toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2});
-  if (p >= 0.01)  return '$' + parseFloat(p).toFixed(2);
-  if (p > 0)      return '$' + parseFloat(p).toFixed(4);
-  return '$0.00';
+  if (p >= 10000) return symbol + Math.round(p).toLocaleString('en-AU');
+  if (p >= 100)   return symbol + p.toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2});
+  if (p >= 0.01)  return symbol + parseFloat(p).toFixed(4);
+  if (p > 0)      return symbol + parseFloat(p).toFixed(8);
+  return symbol + '0.00';
 }
-function fmtAUDCompact(p) {
+function fmtAUDCompact(p, pair) {
+  const curr   = pair ? pairCurrency(pair) : 'AUD';
+  const symbol = curr === 'USD' ? 'US$' : 'A$';
   if (!p) return '--';
-  if (p >= 1000) return '$' + (p/1000).toFixed(1) + 'k';
-  return '$' + parseFloat(p).toFixed(2);
+  if (p >= 1000) return symbol + (p/1000).toFixed(1) + 'k';
+  return symbol + parseFloat(p).toFixed(2);
 }
 function getAUDCash() {
-  // Include ZAUD, AUD and AUDX — all pegged 1:1 to AUD
-  return Object.entries(balance).reduce((s,[a,q]) =>
-    (a==='ZAUD'||a==='AUD'||a==='AUDX') ? s+parseFloat(q) : s, 0);
+  return Object.entries(balance).reduce((s,[a,q]) => {
+    if (a==='ZAUD'||a==='AUD'||a==='AUDX') return s + parseFloat(q);
+    if ((a==='ZUSD'||a==='USD') && currencyMode !== 'AUD') return s + parseFloat(q) * 1.55;
+    return s;
+  }, 0);
 }
 
 // ── API ───────────────────────────────────────────────────────
@@ -670,9 +717,11 @@ async function checkServer() {
 
 async function refreshPrices() {
   try {
-    const r = await api('/api/ticker?pairs=' + PAIRS.join(','));
+    const active = getActivePairs();
+    const r = await api('/api/ticker?pairs=' + active.join(','));
     if (r.data && Object.keys(r.data).length) {
       prices = r.data;
+      PAIRS  = active; // keep in sync
       if (currentTab === 'dashboard') updateLivePrices();
     }
   } catch(e) { console.warn('Prices:', e.message); }
@@ -1620,6 +1669,20 @@ function renderPortfolio() {
         </div>`).join('')}
     </div></div>` : ''}
 
+    <div class="section-label">Performance vs Benchmarks<div class="section-head-line"></div></div>
+    <div class="card" id="perfBenchmark"><div class="card-body">
+      <div class="loading"><div class="spin"></div>Loading performance data...</div>
+    </div></div>
+
+    <div class="section-label">Correlation Intelligence<div class="section-head-line"></div></div>
+    <div class="card" id="correlationCard"><div class="card-body">
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:10px;font-family:'Space Grotesk',sans-serif;line-height:1.6">
+        Which coins recover fastest after BTC drops? Based on last 30 days.
+      </div>
+      <button class="btn btn-ghost" onclick="loadCorrelation()" style="margin-bottom:10px">📊 Calculate Correlations</button>
+      <div id="correlationResult"></div>
+    </div></div>
+
     <div class="section-label">Target Allocation<div class="section-head-line"></div></div>
     <div class="card"><div class="card-body">
       <div style="font-size:12px;color:var(--grey1);margin-bottom:12px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
@@ -1639,6 +1702,20 @@ function renderPortfolio() {
         <button class="btn btn-ghost" onclick="checkAllocation()">⚖️ Check Drift</button>
       </div>
       <div id="allocationResult" style="margin-top:10px"></div>
+
+      <!-- Auto-Rebalance -->
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700">Auto-Rebalance</div>
+            <div style="font-size:11px;color:var(--grey2);margin-top:1px">Auto-trade when drift exceeds threshold</div>
+          </div>
+          <button onclick="toggleRebalance()" id="rebalanceToggle"
+            style="padding:6px 14px;border-radius:20px;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;cursor:pointer;border:none;
+            background:rgba(255,255,255,0.06);color:var(--grey2)" id="rebalanceBtn">● OFF</button>
+        </div>
+        <button class="btn btn-ghost" onclick="runRebalanceNow()" style="font-size:11px;padding:9px">Run Rebalance Now</button>
+      </div>
     </div></div>
 
     <div class="section-label">Australian Tax Export<div class="section-head-line"></div></div>
@@ -1661,7 +1738,7 @@ function renderPortfolio() {
     <div class="spacer"></div>
   </div>`;
 
-  setTimeout(() => { loadRecentTrades(); loadPnL(); loadPerformanceChart(); loadAllocationData(); }, 80);
+  setTimeout(() => { loadRecentTrades(); loadPnL(); loadPerformanceChart(); loadAllocationData(); loadPerformanceBenchmark(); }, 80);
 }
 
 async function loadPnL() {
@@ -1787,7 +1864,139 @@ async function downloadTaxCSV() {
   } catch(e) { showToast('Error: ' + e.message); }
 }
 
-async function loadAllocationData() {
+// ── Performance Benchmarking ──────────────────────────────────
+async function loadPerformanceBenchmark() {
+  const el = document.getElementById('perfBenchmark');
+  if (!el || !serverOnline || !cfg.botToken) return;
+  try {
+    const res  = await api('/api/performance?days=30');
+    const d    = res.data;
+    if (!d) { el.innerHTML = '<div class="card-body" style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif">Not enough data yet — needs at least 2 portfolio snapshots. Check back after 24 hours.</div>'; return; }
+    const alphaCol  = d.alpha >= 0 ? 'var(--green)' : 'var(--red)';
+    const botCol    = d.botReturn >= 0 ? 'var(--green)' : 'var(--red)';
+    const btcCol    = d.btcReturn >= 0 ? 'var(--green)' : 'var(--red)';
+    el.innerHTML = `<div class="card-body">
+      <div style="display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;gap:0;margin-bottom:14px;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.1);border-radius:12px;overflow:hidden">
+        <div style="padding:12px;text-align:center">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:${botCol}">${d.botReturn>=0?'+':''}${d.botReturn}%</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">KRAKN·AI</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.08)"></div>
+        <div style="padding:12px;text-align:center">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:${btcCol}">${d.btcReturn>=0?'+':''}${d.btcReturn}%</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">BTC HOLD</div>
+        </div>
+        <div style="background:rgba(0,212,255,0.08)"></div>
+        <div style="padding:12px;text-align:center">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:var(--grey2)">0%</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">AUD CASH</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:10px">
+        <div style="flex:1;padding:10px;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.1);border-radius:10px;text-align:center">
+          <div style="font-size:11px;color:${alphaCol};font-weight:700;font-family:'Space Grotesk',sans-serif">${d.alpha>=0?'+':''}${d.alpha}% alpha</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:2px">${d.outperforming?'Beating BTC':'Lagging BTC'}</div>
+        </div>
+        <div style="flex:1;padding:10px;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.1);border-radius:10px;text-align:center">
+          <div style="font-size:11px;color:${d.winRate>=55?'var(--green)':'var(--yellow)'};font-weight:700;font-family:'Space Grotesk',sans-serif">${d.winRate}% win rate</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:2px">${d.totalTrades} trades / 30d</div>
+        </div>
+      </div>
+      ${d.bestTrade?`<div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">Best: <span style="color:var(--green)">${d.bestTrade.sym} +${fmtAUD(d.bestTrade.pnl)}</span> · Worst: <span style="color:var(--red)">${d.worstTrade.sym} ${fmtAUD(d.worstTrade.pnl)}</span></div>`:''}
+    </div>`;
+  } catch(e) { el.innerHTML = `<div class="card-body" style="color:var(--red);font-size:12px">${e.message}</div>`; }
+}
+
+// ── Correlation Intelligence ──────────────────────────────────
+async function loadCorrelation() {
+  const el = document.getElementById('correlationResult');
+  if (!el) return;
+  el.innerHTML = '<div class="loading"><div class="spin"></div>Calculating...</div>';
+  try {
+    const res = await api('/api/correlation');
+    const best = res.data?.bestRecoveryCoins || [];
+    if (!best.length) { el.innerHTML = '<div style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif">Not enough data yet — needs 30 days of history</div>'; return; }
+    el.innerHTML = `
+      <div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;margin-bottom:8px">
+        🏆 Best recovery after BTC drops (last 30 days):
+      </div>` +
+      best.map((c,i) => `
+        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-family:'Space Grotesk',sans-serif">
+          <span style="font-weight:700;color:${i===0?'var(--green)':'var(--white)'}">${i+1}. ${c.sym}</span>
+          <span style="color:var(--green);font-weight:600">${c.avgRecovery} avg recovery</span>
+          <span style="color:var(--grey2);font-size:11px">${c.events} events</span>
+        </div>`).join('');
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);font-size:12px">${e.message}</div>`; }
+}
+
+// ── Grid Trading ──────────────────────────────────────────────
+async function createGrid() {
+  const pair   = document.getElementById('gridPair')?.value;
+  const lower  = parseFloat(document.getElementById('gridLower')?.value);
+  const upper  = parseFloat(document.getElementById('gridUpper')?.value);
+  const count  = parseInt(document.getElementById('gridCount')?.value) || 5;
+  const amount = parseFloat(document.getElementById('gridAmount')?.value);
+  if (!lower || !upper || !amount) { showToast('Fill in all grid fields'); return; }
+  if (lower >= upper) { showToast('Upper price must be above lower'); return; }
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  try {
+    const res = await api(`/api/grid/${pair}`, { method:'POST', body:JSON.stringify({ upperPrice:upper, lowerPrice:lower, gridCount:count, amountPerGrid:amount }) });
+    const el  = document.getElementById('gridStatus');
+    const levels = res.data?.levels || [];
+    if (el) el.innerHTML = `<div style="color:var(--green);font-weight:600">✅ Grid active — ${levels.length} levels</div>
+      <div style="margin-top:6px;opacity:0.7">${levels.map(l=>`${fmtAUD(l, pair)}`).join(' · ')}</div>`;
+    showToast('✅ Grid activated!');
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+// ── Macro Events ──────────────────────────────────────────────
+async function loadMacroEvents() {
+  const el = document.getElementById('macroEvents');
+  if (!el || !serverOnline || !cfg.botToken) return;
+  el.innerHTML = '<div class="loading"><div class="spin"></div>Loading...</div>';
+  try {
+    const res    = await api('/api/macro/events');
+    const events = res.data || [];
+    if (!events.length) { el.innerHTML = '<div style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif">No high-impact events found this week.</div>'; return; }
+    el.innerHTML = events.map(e => {
+      const dt = new Date(`${e.date} ${e.time}`);
+      const minsUntil = Math.round((dt - Date.now()) / 60000);
+      const soon = minsUntil > 0 && minsUntil <= 120;
+      return `<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center">
+        <div style="font-size:18px">${soon?'🚨':'📅'}</div>
+        <div style="flex:1">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:700;color:${soon?'var(--yellow)':'var(--white)'}">${e.title}</div>
+          <div style="font-size:10px;color:var(--grey2);margin-top:2px">${e.country} · ${e.date} ${e.time} UTC</div>
+        </div>
+        ${soon?`<div style="font-size:10px;font-weight:700;color:var(--yellow)">${minsUntil}m</div>`:''}
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);font-size:12px">${e.message}</div>`; }
+}
+
+// ── Rebalancing ───────────────────────────────────────────────
+async function toggleRebalance() {
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  try {
+    const curr = (await api('/api/rebalance/config')).data;
+    await api('/api/rebalance/config', { method:'POST', body:JSON.stringify({ enabled:!curr.enabled }) });
+    const btn = document.getElementById('rebalanceToggle');
+    if (btn) {
+      const now = !curr.enabled;
+      btn.textContent  = now ? '● ON' : '● OFF';
+      btn.style.background = now ? 'var(--green)' : 'rgba(255,255,255,0.06)';
+      btn.style.color      = now ? '#000' : 'var(--grey2)';
+    }
+    showToast(!curr.enabled ? '✅ Auto-rebalance ON' : 'Auto-rebalance OFF');
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function runRebalanceNow() {
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  showToast('⚖️ Rebalancing — check Telegram!');
+  try { await api('/api/rebalance/run', { method:'POST' }); }
+  catch(e) { showToast('Error: ' + e.message); }
+}
   if (!serverOnline || !cfg.botToken) return;
   try {
     const res = await api('/api/allocation');
@@ -1999,6 +2208,39 @@ function renderBot() {
         Bot will never sell within this many minutes of a buy. 60 min recommended.
       </div>
 
+      <!-- AUTO-BUY -->
+      <div style="background:linear-gradient(135deg,rgba(0,200,150,0.06),rgba(0,200,150,0.02));border:1px solid rgba(0,200,150,0.2);border-radius:14px;padding:16px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:700;color:var(--white)">🤖 Auto-Buy Mode</div>
+            <div style="font-size:11px;color:var(--grey2);margin-top:3px">AI buys automatically — no YES/NO needed</div>
+          </div>
+          <button onclick="toggleAutoBuy()" id="autoBuyToggle"
+            style="padding:7px 16px;border-radius:20px;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;cursor:pointer;border:none;transition:all 0.2s;
+            background:${botCfg.autoBuy?'var(--green)':'rgba(255,255,255,0.06)'};
+            color:${botCfg.autoBuy?'#000':'var(--grey2)'}">
+            ${botCfg.autoBuy ? '● ON' : '● OFF'}
+          </button>
+        </div>
+        <div style="font-size:12px;color:var(--grey1);line-height:1.6;margin-bottom:12px;font-family:'Space Grotesk',sans-serif">
+          When ON, the bot places buy orders automatically when confidence exceeds the threshold below.
+          A Telegram notification confirms every auto-buy immediately.
+        </div>
+        <div class="row2">
+          <div>
+            <div class="field-label">Min confidence to auto-buy (%)</div>
+            <input class="input" id="autoBuyMinConf" type="number" value="${botCfg.autoBuyMinConfidence||82}" min="75" max="99" placeholder="82" style="margin-bottom:0">
+          </div>
+          <div>
+            <div class="field-label">Max per trade (AUD)</div>
+            <input class="input" id="autoBuyMax" type="number" value="${botCfg.autoBuyMaxAUD||200}" min="10" max="10000" placeholder="200" style="margin-bottom:0">
+          </div>
+        </div>
+        <div style="margin-top:10px;padding:8px 12px;background:rgba(255,184,0,0.06);border:1px solid rgba(255,184,0,0.2);border-radius:8px;font-size:11px;color:var(--yellow);font-family:'Space Grotesk',sans-serif;line-height:1.6">
+          ⚠️ Recommended: set confidence threshold to 82%+ and keep max trade size conservative until you trust the strategy. Start with A$50-100 max.
+        </div>
+      </div>
+
       <div class="field-label">Risk Level</div>
       <select class="input" id="botRisk">
         <option value="conservative" ${botCfg.riskLevel==='conservative'?'selected':''}>Conservative — stronger signal required</option>
@@ -2087,7 +2329,49 @@ function renderBot() {
       <span style="color:var(--yellow)">⚠️ Holdings under your minimum value are completely ignored.</span>
     </div></div>
 
-    <!-- Backtesting Engine -->
+    <!-- Grid Trading -->
+    <div class="section-label" style="margin-top:4px">Grid Trading Strategy<div class="section-head-line"></div></div>
+    <div class="card"><div class="card-body">
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:12px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
+        Profits from sideways markets by placing buy orders below price and sell orders above at set intervals. Best when market is ranging.
+      </div>
+      <div class="field-label">Coin Pair</div>
+      <select class="input" id="gridPair">
+        ${PAIRS.map(p=>`<option value="${p}">${DISPLAY[p]||p}</option>`).join('')}
+      </select>
+      <div class="row2">
+        <div>
+          <div class="field-label">Lower Price (AUD)</div>
+          <input class="input" id="gridLower" type="number" placeholder="e.g. 85000">
+        </div>
+        <div>
+          <div class="field-label">Upper Price (AUD)</div>
+          <input class="input" id="gridUpper" type="number" placeholder="e.g. 95000">
+        </div>
+      </div>
+      <div class="row2">
+        <div>
+          <div class="field-label">Grid Levels</div>
+          <input class="input" id="gridCount" type="number" value="5" min="3" max="20">
+        </div>
+        <div>
+          <div class="field-label">AUD per Grid</div>
+          <input class="input" id="gridAmount" type="number" placeholder="50">
+        </div>
+      </div>
+      <button class="btn btn-cyan" onclick="createGrid()">▦ Activate Grid</button>
+      <div id="gridStatus" style="margin-top:10px;font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif"></div>
+    </div></div>
+
+    <!-- Macro Events -->
+    <div class="section-label" style="margin-top:4px">Macro Event Calendar<div class="section-head-line"></div></div>
+    <div class="card"><div class="card-body">
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:10px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
+        High-impact economic events that can move crypto markets. Stop-loss automatically tightens 60 minutes before each event.
+      </div>
+      <button class="btn btn-ghost" onclick="loadMacroEvents()" style="margin-bottom:10px">📅 Load This Week's Events</button>
+      <div id="macroEvents"></div>
+    </div></div>
     <div class="section-label" style="margin-top:4px">Strategy Backtester<div class="section-head-line"></div></div>
     <div class="card"><div class="card-body">
       <div style="font-size:12px;color:var(--grey1);margin-bottom:12px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
@@ -2245,12 +2529,30 @@ function toggleTrailing() {
   if (btn) { btn.textContent = botCfg.trailingStop ? '● ON' : '● OFF'; btn.className = `btn ${botCfg.trailingStop ? 'btn-cyan' : 'btn-ghost'}`; btn.style.cssText = 'width:auto;padding:6px 12px;font-size:11px'; }
 }
 
+async function toggleAutoBuy() {
+  botCfg.autoBuy = !botCfg.autoBuy;
+  const btn = document.getElementById('autoBuyToggle');
+  if (btn) {
+    btn.textContent = botCfg.autoBuy ? '● ON' : '● OFF';
+    btn.style.background = botCfg.autoBuy ? 'var(--green)' : 'rgba(255,255,255,0.06)';
+    btn.style.color = botCfg.autoBuy ? '#000' : 'var(--grey2)';
+  }
+  if (botCfg.autoBuy) {
+    showToast('🤖 Auto-buy ON — bot will buy automatically above threshold');
+  } else {
+    showToast('Auto-buy OFF — manual YES/NO prompts restored');
+  }
+  await saveBotConfig();
+}
+
 async function saveBotConfig() {
-  botCfg.confidenceMin      = parseInt(document.getElementById('botConfMin')?.value)||75;
-  botCfg.riskLevel          = document.getElementById('botRisk')?.value||'conservative';
-  botCfg.minHoldingValueAUD = parseInt(document.getElementById('botMinHolding')?.value)||50;
-  botCfg.stopLossPct        = parseFloat(document.getElementById('stopLossPct')?.value)||8;
-  botCfg.minHoldMinutes     = parseInt(document.getElementById('botMinHold')?.value)||60;
+  botCfg.confidenceMin        = parseInt(document.getElementById('botConfMin')?.value)||75;
+  botCfg.riskLevel            = document.getElementById('botRisk')?.value||'conservative';
+  botCfg.minHoldingValueAUD   = parseInt(document.getElementById('botMinHolding')?.value)||50;
+  botCfg.stopLossPct          = parseFloat(document.getElementById('stopLossPct')?.value)||8;
+  botCfg.minHoldMinutes       = parseInt(document.getElementById('botMinHold')?.value)||60;
+  botCfg.autoBuyMinConfidence = parseInt(document.getElementById('autoBuyMinConf')?.value)||82;
+  botCfg.autoBuyMaxAUD        = parseInt(document.getElementById('autoBuyMax')?.value)||200;
   if(!serverOnline){ showToast('Server offline'); return; }
   try {
     await api('/api/bot/config',{method:'POST',body:JSON.stringify(botCfg)});
@@ -2290,10 +2592,234 @@ async function loadDCAConfig() {
   try { const res = await api('/api/dca/config'); if (res.data) Object.assign(dcaCfg, res.data); } catch(e) {}
 }
 
-// ── Settings Tab ──────────────────────────────────────────────
-function renderSettings() {
+// ── Smart Money Tab ───────────────────────────────────────────
+let smWallets = [];
+let smAlerts  = [];
+let smEnabled = true;
+
+async function renderSmartMoney() {
   document.getElementById('mainContent').innerHTML = `<div class="fade-in">
-    <div style="padding:20px 20px 0">
+    <div class="section-label" style="padding-top:16px">Smart Money Tracker 🐋<div class="section-head-line"></div></div>
+
+    <!-- Status card -->
+    <div class="card"><div class="card-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div>
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:700">Wallet Monitor</div>
+          <div style="font-size:11px;color:var(--grey2);margin-top:2px">Scans every 15 minutes</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div id="smStatus" style="font-size:10px;font-weight:700;letter-spacing:0.1em;padding:4px 12px;border-radius:20px;
+            background:rgba(0,200,150,0.1);color:var(--green);border:1px solid rgba(0,200,150,0.2)">ACTIVE</div>
+          <button onclick="scanSmartMoneyNow()" style="font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;
+            padding:6px 14px;border-radius:20px;background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.2);
+            color:var(--cyan);cursor:pointer">Scan Now</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;line-height:1.6">
+        Monitoring publicly known profitable wallets on Bitcoin, Ethereum and Solana blockchains.
+        Alerts fire when they make significant moves on coins KRAKN·AI is watching.
+      </div>
+    </div></div>
+
+    <!-- Recent alerts -->
+    <div class="section-label">Recent Alerts<div class="section-head-line"></div></div>
+    <div class="card" id="smAlertsCard"><div class="card-body">
+      <div class="loading"><div class="spin"></div>Loading alerts...</div>
+    </div></div>
+
+    <!-- Wallet list -->
+    <div class="section-label" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Watched Wallets<div class="section-head-line" style="display:inline-block;flex:1;height:1px;background:var(--border);margin-left:10px"></div></span>
+    </div>
+    <div id="smWalletList" style="padding:0 18px">
+      <div class="loading"><div class="spin"></div>Loading wallets...</div>
+    </div>
+
+    <!-- Add wallet -->
+    <div class="section-label" style="margin-top:8px">Add Wallet<div class="section-head-line"></div></div>
+    <div class="card"><div class="card-body">
+      <div class="field-label">Wallet Address</div>
+      <input class="input" id="smAddress" placeholder="0x... or Bitcoin address or Solana address">
+      <div class="field-label">Label</div>
+      <input class="input" id="smLabel" placeholder="e.g. Pantera Capital, Smart Trader #3">
+      <div class="row2" style="margin-bottom:12px">
+        <div>
+          <div class="field-label">Chain</div>
+          <select class="input" id="smChain" style="margin-bottom:0">
+            <option value="ethereum">Ethereum</option>
+            <option value="bitcoin">Bitcoin</option>
+            <option value="solana">Solana</option>
+          </select>
+        </div>
+        <div>
+          <div class="field-label">Est. Win Rate (%)</div>
+          <input class="input" id="smWinRate" type="number" min="0" max="100" value="65" style="margin-bottom:0">
+        </div>
+      </div>
+      <button class="btn btn-cyan" onclick="addSmartWallet()">+ Add to Watchlist</button>
+      <div style="margin-top:10px;font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;line-height:1.7">
+        💡 Find profitable wallets at <span style="color:var(--cyan)">lookonchain.com</span>,
+        <span style="color:var(--cyan)">arkham.com</span> or search
+        <span style="color:var(--cyan)">"crypto smart money wallets"</span> on Twitter/X.
+        Look for wallets with 65%+ win rate and consistent realized P&L.
+      </div>
+    </div></div>
+
+    <div class="spacer"></div>
+  </div>`;
+
+  await loadSmartMoneyData();
+}
+
+async function loadSmartMoneyData() {
+  if (!serverOnline || !cfg.botToken) {
+    document.getElementById('smAlertsCard').innerHTML = '<div class="card-body" style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif">Connect server to view smart money data</div>';
+    return;
+  }
+  try {
+    const [walletsRes, alertsRes] = await Promise.all([
+      api('/api/smartmoney/wallets'),
+      api('/api/smartmoney/alerts'),
+    ]);
+    smWallets = walletsRes.data || [];
+    smAlerts  = alertsRes.data  || [];
+    smEnabled = walletsRes.enabled !== false;
+    renderSmWallets();
+    renderSmAlerts();
+  } catch(e) {
+    document.getElementById('smAlertsCard').innerHTML = `<div class="card-body" style="color:var(--red);font-size:12px">${e.message}</div>`;
+  }
+}
+
+function renderSmAlerts() {
+  const el = document.getElementById('smAlertsCard');
+  if (!el) return;
+  if (!smAlerts.length) {
+    el.innerHTML = '<div class="card-body" style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif;padding:16px">No alerts yet — scan runs every 15 minutes. Tap "Scan Now" to check immediately.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="card-body" style="padding:0">' + smAlerts.slice(0,10).map(a => `
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:flex-start">
+      <div style="font-size:18px;flex-shrink:0">${a.action==='BUY'?'🟢':a.action==='SELL'?'🔴':'🟡'}</div>
+      <div style="flex:1">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:700;margin-bottom:2px">
+          ${a.action} ${a.coin} — ${a.walletLabel}
+        </div>
+        <div style="font-size:10px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">
+          ${a.confidence}% confidence · ${new Date(a.timestamp).toLocaleString('en-AU',{timeZone:'Australia/Sydney',dateStyle:'short',timeStyle:'short'})}
+        </div>
+      </div>
+    </div>`).join('') + '</div>';
+}
+
+function renderSmWallets() {
+  const el = document.getElementById('smWalletList');
+  if (!el) return;
+  if (!smWallets.length) {
+    el.innerHTML = '<div style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif;padding:10px 0">No wallets added yet</div>';
+    return;
+  }
+  el.innerHTML = smWallets.map(w => `
+    <div style="background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+        <div style="flex:1">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700;margin-bottom:2px">${w.label}</div>
+          <div style="font-size:10px;color:var(--grey2);font-family:'Space Mono',monospace">${w.address.slice(0,12)}...${w.address.slice(-6)}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;margin-left:8px">
+          <span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;
+            background:${w.active?'rgba(0,200,150,0.1)':'rgba(255,255,255,0.04)'};
+            color:${w.active?'var(--green)':'var(--grey2)'};
+            border:1px solid ${w.active?'rgba(0,200,150,0.2)':'var(--border)'};
+            cursor:pointer" onclick="toggleSmWallet('${w.id}')">
+            ${w.active?'ON':'OFF'}
+          </span>
+          <span style="font-size:16px;cursor:pointer;color:var(--red);padding:2px 6px" onclick="removeSmWallet('${w.id}')">✕</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px">
+        <div style="font-size:10px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">
+          Chain: <span style="color:var(--white)">${w.chain}</span>
+        </div>
+        <div style="font-size:10px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">
+          Win Rate: <span style="color:${w.winRate>=0.7?'var(--green)':'var(--yellow)'};font-weight:700">${(w.winRate*100).toFixed(0)}%</span>
+        </div>
+        ${w.tags?.length?`<div style="font-size:10px;color:var(--grey2)">${w.tags.slice(0,2).join(' · ')}</div>`:''}
+      </div>
+    </div>`).join('');
+}
+
+async function scanSmartMoneyNow() {
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  showToast('🐋 Scanning wallets — check Telegram!');
+  try { await api('/api/smartmoney/scan', { method:'POST' }); }
+  catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function addSmartWallet() {
+  const address = document.getElementById('smAddress')?.value?.trim();
+  const label   = document.getElementById('smLabel')?.value?.trim();
+  const chain   = document.getElementById('smChain')?.value;
+  const winRate = parseFloat(document.getElementById('smWinRate')?.value) / 100;
+  if (!address || !label) { showToast('Enter address and label'); return; }
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  try {
+    await api('/api/smartmoney/wallets', {
+      method: 'POST',
+      body: JSON.stringify({ address, label, chain, winRate })
+    });
+    showToast('✅ Wallet added!');
+    document.getElementById('smAddress').value = '';
+    document.getElementById('smLabel').value   = '';
+    await loadSmartMoneyData();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function removeSmWallet(id) {
+  if (!confirm('Remove this wallet from watchlist?')) return;
+  try {
+    await api('/api/smartmoney/wallets/' + id, { method:'DELETE' });
+    showToast('Wallet removed');
+    await loadSmartMoneyData();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function toggleSmWallet(id) {
+  try {
+    await api('/api/smartmoney/wallets/' + id + '/toggle', { method:'POST' });
+    await loadSmartMoneyData();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+  const activePairs = getActivePairs();
+  document.getElementById('mainContent').innerHTML = `<div class="fade-in">
+
+    <div class="section-label" style="padding-top:16px">Trading Currency<div class="section-head-line"></div></div>
+    <div class="card"><div class="card-body">
+      <div style="font-size:12px;color:var(--grey1);margin-bottom:14px;line-height:1.6;font-family:'Space Grotesk',sans-serif">
+        Choose which markets to trade. AUD uses your 8 home pairs. USD unlocks 23 additional coins including MATIC, AVAX, DOGE and more. BOTH watches all 31 simultaneously.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+        ${['AUD','USD','BOTH'].map(m => `
+          <button onclick="setCurrencyMode('${m}')" style="
+            padding:14px 8px;border-radius:12px;font-family:'Space Grotesk',sans-serif;
+            font-size:12px;font-weight:700;letter-spacing:0.04em;cursor:pointer;
+            border:1px solid ${currencyMode===m?'var(--cyan)':'rgba(0,212,255,0.15)'};
+            background:${currencyMode===m?'rgba(0,212,255,0.15)':'rgba(0,212,255,0.04)'};
+            color:${currencyMode===m?'var(--cyan)':'var(--grey1)'};transition:all 0.15s">
+            ${m==='AUD'?'🇦🇺 AUD ONLY':m==='USD'?'🇺🇸 USD ONLY':'🌐 BOTH'}
+            <div style="font-size:9px;font-weight:500;margin-top:4px;opacity:0.7">
+              ${m==='AUD'?'8 pairs':m==='USD'?'23 pairs':'31 pairs'}
+            </div>
+          </button>`).join('')}
+      </div>
+      <div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">
+        Currently watching <span style="color:var(--cyan);font-weight:700">${activePairs.length} pairs</span> in <span style="color:var(--cyan);font-weight:700">${currencyMode}</span> mode
+      </div>
+    </div></div>
+
+    <div class="section-label">Backend Server<div class="section-head-line"></div></div>
+    <div style="padding:0 18px">
       <div class="field-label">Server URL</div>
       <input class="input" id="inputUrl" type="url" placeholder="https://your-server.railway.app" value="${cfg.serverUrl}">
       <div class="field-label">Bot Secret Token</div>
@@ -2332,6 +2858,23 @@ function renderSettings() {
   </div>`;
 }
 
+async function setCurrencyMode(mode) {
+  currencyMode = mode;
+  localStorage.setItem('currencyMode', mode);
+  PAIRS = getActivePairs();
+  // Reset selected pair to first in new active list
+  if (!PAIRS.includes(selectedPair)) selectedPair = PAIRS[0];
+  // Tell server
+  if (serverOnline && cfg.botToken) {
+    try {
+      await api('/api/currency/mode', { method:'POST', body:JSON.stringify({ mode }) });
+    } catch(e) {}
+  }
+  showToast(`✅ Switched to ${mode} mode — watching ${PAIRS.length} pairs`);
+  // Re-render current tab
+  showTab(currentTab);
+}
+
 async function saveServerConfig() {
   cfg.serverUrl=document.getElementById('inputUrl')?.value?.trim().replace(/\/$/,'')||'';
   cfg.botToken =document.getElementById('inputToken')?.value?.trim()||'';
@@ -2352,6 +2895,7 @@ function showTab(tab) {
   else if (tab==='trade')     renderTrade();
   else if (tab==='portfolio') renderPortfolio();
   else if (tab==='alerts')    renderAlerts();
+  else if (tab==='smartmoney') renderSmartMoney();
   else if (tab==='bot')       renderBot();
   else if (tab==='settings')  renderSettings();
 }
