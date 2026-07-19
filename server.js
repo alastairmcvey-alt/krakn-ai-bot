@@ -19,9 +19,14 @@ const path        = require('path');
 let createCanvas;
 try {
   createCanvas = require('@napi-rs/canvas').createCanvas;
+  // Quick test to verify binary works
+  const testCanvas = createCanvas(10, 10);
+  testCanvas.getContext('2d');
   console.log('[CANVAS] ✅ Chart rendering available — Vision analysis enabled');
 } catch(e) {
-  console.warn('[CANVAS] ⚠️ Canvas not available — run npm install to enable vision analysis');
+  console.warn('[CANVAS] ⚠️  Canvas not available:', e.message);
+  console.warn('[CANVAS]    Vision analysis disabled — charts will use numerical signals only');
+  createCanvas = null;
 }
 
 require('dotenv').config();
@@ -62,11 +67,46 @@ const TELEGRAM_TOKEN    = (process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(
 const TELEGRAM_CHAT_ID  = (process.env.TELEGRAM_CHAT_ID  || '').trim().replace(/[\r\n]/g, '');
 
 // ─── AUD Pairs ─────────────────────────────────────────────────
+// ─── Valid AUD pairs (verified against Kraken API) ────────────
 const AUD_PAIRS = ['XBTAUD','ETHAUD','XRPAUD','ADAAUD','SOLAUD','LTCAUD','DOTAUD','LINKAUD'];
 const PAIR_DISPLAY = {
   'XBTAUD':'BTC/AUD','ETHAUD':'ETH/AUD','XRPAUD':'XRP/AUD','ADAAUD':'ADA/AUD',
   'SOLAUD':'SOL/AUD','LTCAUD':'LTC/AUD','DOTAUD':'DOT/AUD','LINKAUD':'LINK/AUD'
 };
+
+// Fallback pair names to try if primary fails
+const PAIR_ALIASES = {
+  'DOTAUD': ['DOTAUD','DOT/AUD','XDOTAUD'],
+  'LINKAUD': ['LINKAUD','LINK/AUD'],
+};
+
+async function fetchSingleTicker(pair) {
+  // Try primary pair name first, then aliases
+  const attempts = [pair, ...(PAIR_ALIASES[pair] || [])];
+  for (const attempt of attempts) {
+    try {
+      const result = await krakenPublicRequest('Ticker', { pair: attempt });
+      const key    = Object.keys(result)[0];
+      if (!key) continue;
+      const d = result[key];
+      return {
+        price:     parseFloat(d.c[0]),
+        bid:       parseFloat(d.b[0]),
+        ask:       parseFloat(d.a[0]),
+        high:      parseFloat(d.h[1]),
+        low:       parseFloat(d.l[1]),
+        volume:    parseFloat(d.v[1]),
+        open:      parseFloat(d.o),
+        change24h: (((parseFloat(d.c[0]) - parseFloat(d.o)) / parseFloat(d.o)) * 100).toFixed(2),
+      };
+    } catch(e) {
+      if (attempt === attempts[attempts.length - 1]) {
+        console.warn(`[TICKER] ${pair} failed: ${e.message}`);
+      }
+    }
+  }
+  return null;
+}
 
 // ─── Kraken Minimum Order Sizes ────────────────────────────────
 const MIN_VOLUMES = {
@@ -348,29 +388,6 @@ function krakenPublicRequest(endpoint, params = {}) {
 }
 
 // ─── Fetch Single Ticker Safely ────────────────────────────────
-async function fetchSingleTicker(pair) {
-  try {
-    const result = await krakenPublicRequest('Ticker', { pair });
-    const key    = Object.keys(result)[0];
-    if (!key) return null;
-    const data = result[key];
-    return {
-      price:     parseFloat(data.c[0]),
-      bid:       parseFloat(data.b[0]),
-      ask:       parseFloat(data.a[0]),
-      high:      parseFloat(data.h[1]),
-      low:       parseFloat(data.l[1]),
-      volume:    parseFloat(data.v[1]),
-      open:      parseFloat(data.o),
-      change24h: (((parseFloat(data.c[0]) - parseFloat(data.o)) / parseFloat(data.o)) * 100).toFixed(2),
-      currency:  'AUD'
-    };
-  } catch(e) {
-    console.warn(`[TICKER] ${pair} failed: ${e.message}`);
-    return null;
-  }
-}
-
 // ─── Auth Middleware ───────────────────────────────────────────
 function requireAuth(req, res, next) {
   const token = req.headers['authorization']?.replace('Bearer ', '');
@@ -852,16 +869,18 @@ async function fetchSentimentScore(sym) {
   const cached = sentimentCache[sym];
   if (cached && (Date.now() - cached.fetchedAt) < 2 * 60 * 60 * 1000) return cached;
 
+  const fallback = { score: 0, label: 'Unknown', reasons: [], fetchedAt: Date.now() };
+
   try {
-    const prompt = `You are a crypto sentiment analyst. Score current market sentiment for ${sym} from -10 (extremely bearish) to +10 (extremely bullish) based on recent news, social media trends, and market conditions.
+    const prompt = `Score crypto sentiment for ${sym} from -10 to +10. Return ONLY this JSON, nothing else:
+{"score":3,"label":"Mildly Bullish","reasons":["reason1"]}`;
 
-Return ONLY a JSON object, no other text:
-{"score": 3, "label": "Mildly Bullish", "reasons": ["reason1", "reason2"]}
-
-Score guide: -10 to -7 = Extreme Fear, -6 to -3 = Bearish, -2 to +2 = Neutral, +3 to +6 = Bullish, +7 to +10 = Extreme Greed`;
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 25000);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -869,21 +888,28 @@ Score guide: -10 to -7 = Extreme Fear, -6 to -3 = Bearish, -2 to +2 = Neutral, +
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 200,
+        max_tokens: 150,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{ role: 'user', content: prompt }]
       })
     });
+    clearTimeout(timeout);
 
     const data = await response.json();
-    const text = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
-    const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const text = (data.content || [])
+      .filter(c => c.type === 'text').map(c => c.text).join('').trim();
 
+    if (!text) throw new Error('Empty response');
+
+    // Extract JSON even if Claude adds surrounding text
+    const match = text.match(/\{[\s\S]*?\}/);
+    if (!match) throw new Error('No JSON in response');
+
+    const parsed = JSON.parse(match[0]);
     const result = {
       score:     Math.max(-10, Math.min(10, parseInt(parsed.score) || 0)),
       label:     parsed.label || 'Neutral',
-      reasons:   parsed.reasons || [],
+      reasons:   Array.isArray(parsed.reasons) ? parsed.reasons.slice(0,2) : [],
       fetchedAt: Date.now(),
     };
     sentimentCache[sym] = result;
@@ -891,7 +917,8 @@ Score guide: -10 to -7 = Extreme Fear, -6 to -3 = Bearish, -2 to +2 = Neutral, +
     return result;
   } catch(e) {
     console.warn(`[SENTIMENT] Failed for ${sym}:`, e.message);
-    return { score: 0, label: 'Unknown', reasons: [], fetchedAt: Date.now() };
+    sentimentCache[sym] = fallback; // cache failure to prevent repeated retries
+    return fallback;
   }
 }
 
