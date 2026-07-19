@@ -275,6 +275,28 @@ let onChainCache = {}; // { sym: { data, fetchedAt } }
 // ─── Stop-Loss Peaks ──────────────────────────────────────────
 let stopLossPeaks = {};
 
+// ─── Grid Trading Config ──────────────────────────────────────
+let gridConfigs = {}; // { pair: { enabled, upper, lower, gridCount, amountPerGrid, orders:[] } }
+
+// ─── Rebalance Config ──────────────────────────────────────────
+let rebalanceConfig = {
+  enabled:        false,
+  driftThreshold: 8,
+  minTradeAUD:    50,
+};
+
+// ─── Smart Money Wallets ───────────────────────────────────────
+let smartWallets = [
+  { id:'sm1',  address:'1P5ZEDWTKTFGxQjZphgWPQUpe554WKDfHQ', label:'MicroStrategy Treasury',    chain:'bitcoin',  winRate:0.89, tags:['institutional','btc-only'], active:true },
+  { id:'sm3',  address:'0x9bf4001d307dfd62b26a2f1307ee0c0307632d59', label:'DeFi Whale Alpha',     chain:'ethereum', winRate:0.72, tags:['defi','smart-trader'], active:true },
+  { id:'sm4',  address:'0x28c6c06298d514db089934071355e5743bf21d60', label:'Binance Hot Wallet 14', chain:'ethereum', winRate:0.81, tags:['exchange','flow-indicator'], active:true },
+  { id:'sm5',  address:'0x21a31ee1afc51d94c2efccaa2092ad1028285549', label:'Binance Hot Wallet 8',  chain:'ethereum', winRate:0.76, tags:['exchange','flow-indicator'], active:true },
+  { id:'sm9',  address:'9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', label:'SOL Whale Alpha',     chain:'solana',   winRate:0.74, tags:['smart-trader','sol-native'], active:true },
+];
+let smartMoneyAlertLog = [];
+let smartMoneyEnabled  = true;
+let smartMoneyCache    = {}; // { walletId: { txs, fetchedAt } }
+
 // ─── DCA (Dollar Cost Averaging) Bot ─────────────────────────
 let dcaConfig = {
   enabled:       false,
@@ -2452,31 +2474,8 @@ app.post('/api/currency/mode', requireAuth, (req, res) => {
 // when they buy/sell coins that KRAKN·AI is also watching
 // ══════════════════════════════════════════════════════════════
 
-// ─── Known Smart Money Wallets ────────────────────────────────
-// Pre-seeded with publicly known profitable addresses
-// User can add/remove via API and frontend
-let smartWallets = [
-  // Bitcoin whales (tracked via Blockchair)
-  { id:'sm1',  address:'1P5ZEDWTKTFGxQjZphgWPQUpe554WKDfHQ', label:'MicroStrategy Treasury',    chain:'bitcoin',  winRate:0.89, tags:['institutional','btc-only'], active:true },
-  { id:'sm2',  address:'3LYJfcfHPXYJreMsASk2jkn69LWEYKzobserved', label:'Binance Cold Wallet',  chain:'bitcoin',  winRate:0.78, tags:['exchange','accumulator'], active:true },
-
-  // Ethereum smart traders (Etherscan)
-  { id:'sm3',  address:'0x9bf4001d307dfd62b26a2f1307ee0c0307632d59', label:'DeFi Whale Alpha',     chain:'ethereum', winRate:0.72, tags:['defi','smart-trader'], active:true },
-  { id:'sm4',  address:'0x28c6c06298d514db089934071355e5743bf21d60', label:'Binance Hot Wallet 14', chain:'ethereum', winRate:0.81, tags:['exchange','flow-indicator'], active:true },
-  { id:'sm5',  address:'0x21a31ee1afc51d94c2efccaa2092ad1028285549', label:'Binance Hot Wallet 8',  chain:'ethereum', winRate:0.76, tags:['exchange','flow-indicator'], active:true },
-  { id:'sm6',  address:'0xf977814e90da44bfa03b6295a0616a897441acec', label:'Binance Hot Wallet 20', chain:'ethereum', winRate:0.79, tags:['exchange','flow-indicator'], active:true },
-  { id:'sm7',  address:'0xa7efae728d2936e78bda97dc267687568dd593f', label:'Smart Trader #1',        chain:'ethereum', winRate:0.68, tags:['smart-trader','early-mover'], active:true },
-  { id:'sm8',  address:'0x1e2fbe6be9eb39fc894d38be976111f332172d83', label:'ETH Accumulator',        chain:'ethereum', winRate:0.71, tags:['accumulator','long-term'], active:true },
-
-  // Solana whales (Solscan)
-  { id:'sm9',  address:'9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', label:'SOL Whale Alpha',     chain:'solana',   winRate:0.74, tags:['smart-trader','sol-native'], active:true },
-  { id:'sm10', address:'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH', label:'Alameda Remnant',     chain:'solana',   winRate:0.66, tags:['institutional','multi-coin'], active:true },
-];
-
-// Cache: what we last saw each wallet doing
-let smartMoneyCache     = {}; // { walletId: { txs, fetchedAt } }
-let smartMoneyAlertLog  = []; // last 50 alerts fired
-let smartMoneyEnabled   = true;
+// ─── Known Smart Money Wallets — pre-seeded defaults ──────────
+// (loaded from saved data on startup, overrides defaults if user has modified)
 
 // ─── Coin address mapping for known tokens ────────────────────
 const TOKEN_ADDRESSES = {
@@ -3043,8 +3042,6 @@ app.get('/api/correlation', requireAuth, async (req, res) => {
 // Places buy orders at intervals below price, sells above
 // Profits from sideways volatile markets
 // ══════════════════════════════════════════════════════════════
-let gridConfigs = {}; // { pair: { enabled, upperPrice, lowerPrice, gridCount, amountPerGrid, orders:[] } }
-
 function calculateGridLevels(lower, upper, count) {
   const levels = [];
   const step   = (upper - lower) / count;
@@ -3132,12 +3129,6 @@ app.delete('/api/grid/:pair', requireAuth, (req, res) => {
 // When a position drifts 8%+ from target, auto-rebalances
 // Extends existing target allocation system
 // ══════════════════════════════════════════════════════════════
-let rebalanceConfig = {
-  enabled:       false,
-  driftThreshold: 8,    // % drift before auto-rebalancing
-  minTradeAUD:   50,    // minimum trade size to bother
-};
-
 async function checkAndRebalance() {
   if (!rebalanceConfig.enabled) return;
   if (!Object.keys(targetAllocation).length) return;
