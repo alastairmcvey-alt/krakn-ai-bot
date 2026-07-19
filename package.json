@@ -1,7 +1,7 @@
 {
   "name": "krakn-ai-bot-server",
-  "version": "2.1.0",
-  "description": "KRAKN·AI Trading Bot — Secure backend server for Kraken API",
+  "version": "4.0.0",
+  "description": "KRAKN·AI Trading Bot — AI-powered crypto trading with chart vision analysis",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,7 +11,9 @@
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "@napi-rs/canvas": "^1.0.2",
+    "@napi-rs/canvas-linux-x64-gnu": "^1.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
@@ -19,6 +21,6 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["kraken", "trading", "bot", "crypto"],
+  "keywords": ["kraken", "trading", "bot", "crypto", "ai"],
   "license": "MIT"
 }
