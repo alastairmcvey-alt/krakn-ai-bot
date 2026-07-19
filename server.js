@@ -14,6 +14,16 @@ const https       = require('https');
 const querystring = require('querystring');
 const fs          = require('fs');
 const path        = require('path');
+
+// Chart rendering for AI vision analysis
+let createCanvas;
+try {
+  createCanvas = require('@napi-rs/canvas').createCanvas;
+  console.log('[CANVAS] ✅ Chart rendering available — Vision analysis enabled');
+} catch(e) {
+  console.warn('[CANVAS] ⚠️ Canvas not available — run npm install to enable vision analysis');
+}
+
 require('dotenv').config();
 
 // ─── Global Crash Protection ───────────────────────────────────
@@ -78,6 +88,7 @@ let advisorSettings = {
 let priceAlerts           = [];
 let pendingBuyOpportunity = null;
 const chatHistory         = {};
+let selectedPairForChat   = 'XBTAUD'; // tracks last coin mentioned in Telegram
 
 // ─── P&L Tracking ──────────────────────────────────────────────
 // Stores every trade we make through the bot for P&L calculation
@@ -893,64 +904,85 @@ function sentimentEmoji(score) {
 }
 async function computeSignalForPair(pair) {
   try {
-    // Analyse 3 timeframes
+    // Analyse 3 timeframes numerically
     const [tf15, tf60, tf240] = await Promise.all([
       analyseTimeframe(pair, 15),
       analyseTimeframe(pair, 60),
       analyseTimeframe(pair, 240),
     ]);
 
-    // Weights: 15min reduced to 0.5 (was 1) to prevent short-timeframe noise
-    // 1hr = 2, 4hr = 4 (was 3) — longer timeframes matter much more
     const weightedScore = (tf15.score * 0.5) + (tf60.score * 2) + (tf240.score * 4);
-    const maxScore      = 26; // updated max possible weighted score
+    const maxScore      = 26;
 
-    // Determine action
     let action = 'HOLD', confidence = 50;
-
-    if (weightedScore >= 6) {
-      action     = 'BUY';
-      confidence = Math.min(95, 55 + (weightedScore / maxScore) * 40);
-    } else if (weightedScore <= -6) {
-      action     = 'SELL';
-      confidence = Math.min(95, 55 + (Math.abs(weightedScore) / maxScore) * 40);
-    } else if (weightedScore >= 3) {
-      action     = 'BUY';
-      confidence = Math.min(70, 45 + (weightedScore / maxScore) * 30);
-    } else if (weightedScore <= -3) {
-      action     = 'SELL';
-      confidence = Math.min(70, 45 + (Math.abs(weightedScore) / maxScore) * 30);
-    }
+    if (weightedScore >= 6)       { action='BUY';  confidence=Math.min(95,55+(weightedScore/maxScore)*40); }
+    else if (weightedScore <= -6) { action='SELL'; confidence=Math.min(95,55+(Math.abs(weightedScore)/maxScore)*40); }
+    else if (weightedScore >= 3)  { action='BUY';  confidence=Math.min(70,45+(weightedScore/maxScore)*30); }
+    else if (weightedScore <= -3) { action='SELL'; confidence=Math.min(70,45+(Math.abs(weightedScore)/maxScore)*30); }
 
     if (botConfig.riskLevel === 'conservative') confidence *= 0.85;
     if (botConfig.riskLevel === 'aggressive')   confidence *= 1.10;
 
-    // Collect all signals across timeframes
     const allSignals = [
       ...tf15.signals.map(s => `15m: ${s}`),
       ...tf60.signals.map(s => `1h: ${s}`),
       ...tf240.signals.map(s => `4h: ${s}`),
     ];
 
+    // ── Vision Analysis — render chart and send to Claude Vision ──
+    let vision = null;
+    if (createCanvas) {
+      try {
+        const ohlc1h    = await krakenPublicRequest('OHLC', { pair, interval: 60 });
+        const k1h       = Object.keys(ohlc1h).find(k => k !== 'last');
+        const candles1h = ohlc1h[k1h].slice(-60);
+
+        vision = await analyseChartWithVision(pair, candles1h, {
+          rsi: tf60.rsi, macdTrend: tf60.macd.trend,
+          bbPosition: tf60.bb.position, weightedScore: Math.round(weightedScore),
+        });
+
+        if (vision) {
+          // Vision strongly confirms — boost confidence
+          if (vision.visionAction === action && vision.patternStrength >= 7) {
+            confidence = Math.min(97, confidence * 1.15);
+            allSignals.push(`👁 Vision confirms: ${vision.visualPattern} (${vision.visionConfidence}%)`);
+          }
+          // Vision strongly disagrees — reduce confidence
+          else if (vision.visionAction !== action && vision.visionAction !== 'HOLD' && vision.visionConfidence > 70) {
+            confidence *= 0.75;
+            allSignals.push(`⚠️ Vision ${vision.visionAction}: ${vision.visualPattern}`);
+          }
+          // Vision very confident and opposite — override
+          if (vision.visionConfidence >= 85 && vision.visionAction !== 'HOLD' && vision.visionAction !== action) {
+            action     = vision.visionAction;
+            confidence = Math.min(85, (confidence + vision.visionConfidence) / 2);
+            allSignals.push(`👁 Vision override → ${action}`);
+          }
+        }
+      } catch(e) { console.warn('[VISION] Skipped:', e.message); }
+    }
+
     return {
       action,
-      confidence:    Math.min(99, Math.round(confidence)),
+      confidence:   Math.min(99, Math.round(confidence)),
       weightedScore,
-      signals:       allSignals,
+      signals:      allSignals,
+      vision,
       patterns: [
         ...tf60.patterns.map(p => ({ ...p, tf: '1h' })),
         ...tf240.patterns.map(p => ({ ...p, tf: '4h' })),
       ],
       timeframes: {
-        '15m': { rsi: tf15.rsi, macd: tf15.macd.trend, bb: tf15.bb.position, score: tf15.score, patterns: tf15.patterns.map(p=>p.name) },
-        '1h':  { rsi: tf60.rsi, macd: tf60.macd.trend, bb: tf60.bb.position, score: tf60.score, patterns: tf60.patterns.map(p=>p.name) },
-        '4h':  { rsi: tf240.rsi, macd: tf240.macd.trend, bb: tf240.bb.position, score: tf240.score, patterns: tf240.patterns.map(p=>p.name) },
+        '15m': { rsi:tf15.rsi, macd:tf15.macd.trend, bb:tf15.bb.position, score:tf15.score, patterns:tf15.patterns.map(p=>p.name) },
+        '1h':  { rsi:tf60.rsi, macd:tf60.macd.trend, bb:tf60.bb.position, score:tf60.score, patterns:tf60.patterns.map(p=>p.name) },
+        '4h':  { rsi:tf240.rsi, macd:tf240.macd.trend, bb:tf240.bb.position, score:tf240.score, patterns:tf240.patterns.map(p=>p.name) },
       },
       rsi: tf60.rsi,
     };
   } catch(e) {
     console.error(`[SIGNAL] Error for ${pair}:`, e.message);
-    return { action: 'HOLD', confidence: 0, rsi: 50, signals: [], timeframes: {} };
+    return { action:'HOLD', confidence:0, rsi:50, signals:[], timeframes:{}, vision:null };
   }
 }
 
@@ -1218,6 +1250,10 @@ async function checkBuyOpportunities(marketData) {
     const sentStr  = bestOpportunity.sentiment.score !== 0
       ? `\nSentiment: ${bestOpportunity.sentiment.score}/10 (${bestOpportunity.sentiment.label})`
       : '';
+    const vision   = bestOpportunity.signal?.vision;
+    const visStr   = vision
+      ? `\n👁 Visual: ${vision.visualPattern} — ${vision.keyObservation}`
+      : '';
 
     pendingBuyOpportunity = {
       pair:        bestOpportunity.pair,
@@ -1242,7 +1278,7 @@ async function checkBuyOpportunities(marketData) {
       `RSI: ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
       `24h Change: ${bestOpportunity.change24h > 0 ? '+' : ''}${bestOpportunity.change24h}%\n` +
       `High: ${fmtAUDServer(bestOpportunity.high)} | Low: ${fmtAUDServer(bestOpportunity.low)}` +
-      `${patStr}${sentStr}\n\n` +
+      `${patStr}${sentStr}${visStr}\n\n` +
       `💰 Suggested: <b>${fmtAUDServer(suggestedAUD)}</b> (25% of your AUD cash)\n` +
       `= ${volume} ${bestOpportunity.sym}\n\n` +
       `Reply <b>YES</b> to buy now or <b>NO</b> to skip.\n` +
@@ -1335,17 +1371,18 @@ async function handleTelegramMessage(chatId, userMessage, username) {
 
   if (msg === '/start' || msg === 'start') {
     await sendTelegramTo(chatId,
-      '🤖 <b>KRAKN·AI Assistant</b>\n\n' +
+      '🤖 <b>KRAKN·AI v4.0 Assistant</b>\n\n' +
       'Commands I understand:\n\n' +
       '📊 <b>Market signals</b>\n' +
-      '• "Any signals?"\n' +
-      '• "Are there any trades?"\n' +
-      '• "Scan the market"\n' +
-      '• "Any opportunities?"\n\n' +
+      '• "Any signals?" / "Scan the market"\n' +
+      '• "Any opportunities?" / "Check buys"\n\n' +
+      '📸 <b>Chart analysis (NEW!)</b>\n' +
+      '• "Chart BTC" — renders live chart + AI vision\n' +
+      '• "Chart ETH" / "Show SOL chart"\n' +
+      '• "Snap XRP" — snapshot with pattern detection\n\n' +
       '🔍 <b>Coin specific</b>\n' +
       '• "How is BTC looking?"\n' +
-      '• "Should I buy ETH?"\n' +
-      '• "What\'s SOL doing?"\n\n' +
+      '• "Should I buy ETH?"\n\n' +
       '📈 <b>Portfolio</b>\n' +
       '• "What\'s my portfolio worth?"\n' +
       '• "How am I tracking?"\n\n' +
@@ -1354,6 +1391,68 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       '• YES / NO — reply to buy prompts\n\n' +
       '💡 Or just ask me anything in plain English!'
     );
+    return;
+  }
+
+  // ── Chart snapshot command ────────────────────────────────────
+  const chartCmds = ['chart','send chart','show chart','snap','snapshot','/chart'];
+  const chartMatch = chartCmds.some(c => msg.includes(c));
+  const pairFromMsg = AUD_PAIRS.find(p => {
+    const sym = PAIR_DISPLAY[p]?.replace('/AUD','').toLowerCase();
+    return msg.includes(sym);
+  }) || selectedPairForChat || 'XBTAUD';
+
+  if (chartMatch || msg.match(/chart (btc|eth|sol|xrp|ada|ltc|dot|link)/)) {
+    const pair = pairFromMsg;
+    const dp   = PAIR_DISPLAY[pair] || pair;
+    await sendTelegramTo(chatId, `📸 Rendering ${dp} chart and running vision analysis...`);
+    try {
+      // Call our own chart/telegram endpoint internally
+      const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: 60 });
+      const k       = Object.keys(ohlc).find(k => k !== 'last');
+      const candles = ohlc[k].slice(-60);
+      const buf     = renderChartToBuffer(candles, 600, 300);
+
+      if (!buf) {
+        await sendTelegramTo(chatId, '⚠️ Chart rendering not available. Run npm install on Railway.');
+        return;
+      }
+
+      const signal = await computeSignalForPair(pair);
+      const vision = signal.vision;
+      const ticker = await fetchSingleTicker(pair);
+
+      // Send photo via Telegram API multipart
+      const boundary = '----FB' + Date.now();
+      const chunks   = [];
+      const field    = (n, v) => chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${n}"\r\n\r\n${v}\r\n`));
+      field('chat_id', chatId);
+      field('parse_mode', 'HTML');
+      field('caption',
+        `📊 <b>${dp} — ${fmtAUDServer(ticker?.price || 0)}</b>\n\n` +
+        `${signal.action==='BUY'?'🟢':signal.action==='SELL'?'🔴':'🟡'} <b>${signal.action}</b> ${signal.confidence}% | RSI: ${signal.rsi} | Score: ${signal.weightedScore}\n` +
+        `${signal.signals?.slice(0,3).join('\n')}\n` +
+        `${vision ? `\n👁 <b>Vision Analysis</b>\nPattern: ${vision.visualPattern}\n${vision.keyObservation}\nTrend: ${vision.trendDirection} · Support: ${fmtAUDServer(vision.supportLevel)}` : ''}`
+      );
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${dp.replace('/','_')}.png"\r\nContent-Type: image/png\r\n\r\n`));
+      chunks.push(buf);
+      chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+      const body = Buffer.concat(chunks);
+
+      await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: 'api.telegram.org',
+          path: `/bot${TELEGRAM_TOKEN}/sendPhoto`,
+          method: 'POST',
+          headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+        }, (res) => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>resolve(JSON.parse(d))); });
+        r.on('error', reject); r.write(body); r.end();
+      });
+
+      console.log(`[CHART TELEGRAM] Sent ${dp} chart to ${chatId}`);
+    } catch(e) {
+      await sendTelegramTo(chatId, `❌ Chart failed: ${e.message}`);
+    }
     return;
   }
 
@@ -2045,6 +2144,75 @@ async function recordPortfolioSnapshot() {
 app.get('/api/portfolio/history', requireAuth, (req, res) => {
   res.json({ success: true, data: portfolioHistory });
 });
+
+// ─── Chart Vision Snapshot Routes ──────────────────────────────
+app.get('/api/chart/snapshot/:pair', requireAuth, async (req, res) => {
+  try {
+    const pair     = req.params.pair.toUpperCase();
+    const interval = parseInt(req.query.interval) || 60;
+    const ohlc     = await krakenPublicRequest('OHLC', { pair, interval });
+    const k        = Object.keys(ohlc).find(k => k !== 'last');
+    const candles  = ohlc[k].slice(-60);
+    const buf      = renderChartToBuffer(candles, 600, 300);
+    if (!buf) return res.status(503).json({ error: 'Canvas not available — run npm install' });
+    res.setHeader('Content-Type', 'image/png');
+    res.send(buf);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/chart/telegram/:pair', requireAuth, async (req, res) => {
+  try {
+    const pair     = req.params.pair.toUpperCase();
+    const dp       = PAIR_DISPLAY[pair] || pair;
+    const interval = parseInt(req.query.interval) || 60;
+    const ohlc     = await krakenPublicRequest('OHLC', { pair, interval });
+    const k        = Object.keys(ohlc).find(k => k !== 'last');
+    const candles  = ohlc[k].slice(-60);
+    const buf      = renderChartToBuffer(candles, 600, 300);
+    if (!buf) return res.status(503).json({ error: 'Canvas not available' });
+    const signal   = await computeSignalForPair(pair);
+    const vision   = signal.vision;
+    const ticker   = await fetchSingleTicker(pair);
+
+    // Send photo to Telegram using multipart form
+    const boundary = '----FormBoundary' + Date.now();
+    const chunks   = [];
+    const field = (name, value) => {
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+    };
+    field('chat_id', TELEGRAM_CHAT_ID);
+    field('parse_mode', 'HTML');
+    field('caption',
+      `📊 <b>${dp} — ${fmtAUDServer(ticker?.price || 0)}</b>\n\n` +
+      `${signal.action === 'BUY' ? '🟢' : signal.action === 'SELL' ? '🔴' : '🟡'} <b>${signal.action}</b> ${signal.confidence}% | Score: ${signal.weightedScore} | RSI: ${signal.rsi}\n` +
+      `${vision ? `\n👁 <b>Visual Analysis</b>\n` +
+        `Pattern: ${vision.visualPattern}\n` +
+        `${vision.keyObservation}\n` +
+        `Trend: ${vision.trendDirection} (${vision.trendStrength})\n` +
+        `Support: ${fmtAUDServer(vision.supportLevel)} | Resistance: ${fmtAUDServer(vision.resistanceLevel)}` : ''}`
+    );
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${dp.replace('/','_')}.png"\r\nContent-Type: image/png\r\n\r\n`));
+    chunks.push(buf);
+    chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+    const body = Buffer.concat(chunks);
+
+    await new Promise((resolve, reject) => {
+      const req2 = require('https').request({
+        hostname: 'api.telegram.org',
+        path:     `/bot${TELEGRAM_TOKEN}/sendPhoto`,
+        method:   'POST',
+        headers:  { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+      }, (res2) => { let d=''; res2.on('data',c=>d+=c); res2.on('end',()=>resolve(JSON.parse(d))); });
+      req2.on('error', reject);
+      req2.write(body);
+      req2.end();
+    });
+
+    console.log(`[CHART TELEGRAM] Sent ${dp} chart`);
+    res.json({ success: true, message: `${dp} chart sent to Telegram`, vision });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/signal/full', requireAuth, async (req, res) => {
   try {
     const { pair } = req.body;
@@ -2428,7 +2596,269 @@ async function runDCA() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// v4.0: BACKTESTING ENGINE
+// v4.0: CHART VISION ENGINE
+// Renders candlestick charts server-side and sends to Claude Vision
+// for pattern recognition beyond what pure numbers can detect
+// ══════════════════════════════════════════════════════════════
+
+// Chart vision cache — avoid re-analysing same candles
+const visionCache = {}; // { cacheKey: { analysis, timestamp } }
+
+function renderChartToBuffer(candles, width = 600, height = 300) {
+  if (!createCanvas) return null;
+  try {
+    const canvas = createCanvas(width, height);
+    const ctx    = canvas.getContext('2d');
+
+    // Background
+    ctx.fillStyle = '#0A0A0F';
+    ctx.fillRect(0, 0, width, height);
+
+    // Grid
+    ctx.strokeStyle = 'rgba(0,212,255,0.08)';
+    ctx.lineWidth   = 0.5;
+    for (let i = 0; i <= 5; i++) {
+      const y = (height / 5) * i;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+    }
+    for (let i = 0; i <= 8; i++) {
+      const x = (width / 8) * i;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+    }
+
+    // Price range
+    const highs  = candles.map(c => parseFloat(c[2]));
+    const lows   = candles.map(c => parseFloat(c[3]));
+    const mn     = Math.min(...lows)  * 0.998;
+    const mx     = Math.max(...highs) * 1.002;
+    const range  = mx - mn || 1;
+
+    const padT = 20, padB = 40, padL = 10, padR = 10;
+    const cW   = width  - padL - padR;
+    const cH   = height - padT - padB;
+    const toY  = v => padT + cH - ((v - mn) / range) * cH;
+    const candW = cW / candles.length;
+    const bodyW = Math.max(candW * 0.65, 2);
+
+    // Volume bars
+    const volumes = candles.map(c => parseFloat(c[6]));
+    const maxVol  = Math.max(...volumes) || 1;
+    const volH    = cH * 0.12;
+
+    candles.forEach((c, i) => {
+      const vol  = parseFloat(c[6]);
+      const bull = parseFloat(c[4]) >= parseFloat(c[1]);
+      const x    = padL + i * candW;
+      const bh   = (vol / maxVol) * volH;
+      ctx.fillStyle = bull ? 'rgba(0,200,150,0.25)' : 'rgba(255,68,102,0.25)';
+      ctx.fillRect(x, height - padB - bh, Math.max(candW - 1, 1), bh);
+    });
+
+    // Candlesticks
+    candles.forEach((c, i) => {
+      const open  = parseFloat(c[1]);
+      const high  = parseFloat(c[2]);
+      const low   = parseFloat(c[3]);
+      const close = parseFloat(c[4]);
+      const bull  = close >= open;
+      const x     = padL + i * candW + candW / 2;
+      const col   = bull ? '#00C896' : '#FF4466';
+
+      // Wick
+      ctx.strokeStyle = col;
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, toY(high));
+      ctx.lineTo(x, toY(low));
+      ctx.stroke();
+
+      // Body
+      const top = toY(Math.max(open, close));
+      const bot = toY(Math.min(open, close));
+      ctx.fillStyle = col;
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(x - bodyW/2, top, bodyW, Math.max(bot - top, 1));
+      ctx.globalAlpha = 1;
+    });
+
+    // 20-period moving average line
+    const closes = candles.map(c => parseFloat(c[4]));
+    const ma20   = [];
+    for (let i = 0; i < closes.length; i++) {
+      if (i < 19) { ma20.push(null); continue; }
+      const avg = closes.slice(i - 19, i + 1).reduce((a,b) => a+b,0) / 20;
+      ma20.push(avg);
+    }
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(255,184,0,0.7)';
+    ctx.lineWidth   = 1.5;
+    let started = false;
+    ma20.forEach((v, i) => {
+      if (v === null) return;
+      const x = padL + i * candW + candW/2;
+      if (!started) { ctx.moveTo(x, toY(v)); started = true; }
+      else ctx.lineTo(x, toY(v));
+    });
+    ctx.stroke();
+
+    // Bollinger Bands
+    const bb20 = [];
+    for (let i = 0; i < closes.length; i++) {
+      if (i < 19) { bb20.push(null); continue; }
+      const slice  = closes.slice(i - 19, i + 1);
+      const mean   = slice.reduce((a,b)=>a+b,0) / 20;
+      const stdDev = Math.sqrt(slice.reduce((s,v)=>s+Math.pow(v-mean,2),0)/20);
+      bb20.push({ upper: mean + 2*stdDev, lower: mean - 2*stdDev });
+    }
+    // Upper band
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(0,212,255,0.35)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([3, 3]);
+    started = false;
+    bb20.forEach((v, i) => {
+      if (!v) return;
+      const x = padL + i * candW + candW/2;
+      if (!started) { ctx.moveTo(x, toY(v.upper)); started = true; }
+      else ctx.lineTo(x, toY(v.upper));
+    });
+    ctx.stroke();
+    // Lower band
+    ctx.beginPath();
+    started = false;
+    bb20.forEach((v, i) => {
+      if (!v) return;
+      const x = padL + i * candW + candW/2;
+      if (!started) { ctx.moveTo(x, toY(v.lower)); started = true; }
+      else ctx.lineTo(x, toY(v.lower));
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Price labels on right
+    ctx.fillStyle  = 'rgba(148,163,184,0.8)';
+    ctx.font       = 'bold 11px sans-serif';
+    ctx.textAlign  = 'right';
+    const lastClose = closes[closes.length - 1];
+    ctx.fillStyle   = lastClose >= closes[closes.length-2] ? '#00C896' : '#FF4466';
+    ctx.fillText(lastClose.toFixed(lastClose > 1000 ? 0 : 4), width - 4, toY(lastClose) + 4);
+
+    // Time labels bottom
+    ctx.fillStyle = 'rgba(148,163,184,0.5)';
+    ctx.font      = '9px sans-serif';
+    ctx.textAlign = 'center';
+    [0, Math.floor(candles.length/4), Math.floor(candles.length/2),
+     Math.floor(candles.length*3/4), candles.length-1].forEach(i => {
+      if (!candles[i]) return;
+      const d = new Date(candles[i][0] * 1000);
+      const x = padL + i * candW + candW/2;
+      ctx.fillText(`${d.getDate()}/${d.getMonth()+1}`, x, height - padB + 12);
+    });
+
+    return canvas.toBuffer('image/png');
+  } catch(e) {
+    console.error('[CHART RENDER]', e.message);
+    return null;
+  }
+}
+
+async function analyseChartWithVision(pair, candles, indicators) {
+  if (!createCanvas) return null;
+  try {
+    // Check cache — use last candle timestamp as key
+    const lastCandle = candles[candles.length - 1];
+    const cacheKey   = `${pair}_${lastCandle[0]}`;
+    const cached     = visionCache[cacheKey];
+    if (cached && (Date.now() - cached.timestamp) < 15 * 60 * 1000) {
+      return cached.analysis;
+    }
+
+    const imgBuffer = renderChartToBuffer(candles, 600, 300);
+    if (!imgBuffer) return null;
+    const base64Img = imgBuffer.toString('base64');
+
+    const dp = PAIR_DISPLAY[pair] || pair;
+    const prompt = `You are an expert technical analyst reviewing a ${dp} candlestick chart.
+
+The chart shows:
+- Candlestick OHLC data (green = bullish, red = bearish)
+- Yellow line = 20-period moving average
+- Blue dashed lines = Bollinger Bands (2 std dev)
+- Volume bars at bottom
+
+Current calculated indicators:
+- RSI (1h): ${indicators.rsi}
+- MACD trend: ${indicators.macdTrend}
+- Bollinger Band position: ${indicators.bbPosition}
+- Weighted signal score: ${indicators.weightedScore}
+
+Analyse the VISUAL chart for:
+1. Chart patterns (head & shoulders, triangles, wedges, flags, double tops/bottoms)
+2. Support and resistance levels
+3. Trend direction and strength
+4. Volume confirmation of moves
+5. Any divergences or warning signs
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "visualPattern": "name of main pattern or 'No clear pattern'",
+  "patternSignal": "BULLISH|BEARISH|NEUTRAL",
+  "patternStrength": 7,
+  "supportLevel": 90000,
+  "resistanceLevel": 95000,
+  "trendDirection": "UPTREND|DOWNTREND|SIDEWAYS",
+  "trendStrength": "STRONG|MODERATE|WEAK",
+  "volumeConfirmation": true,
+  "visualScore": 6,
+  "keyObservation": "one sentence describing the most important visual signal",
+  "visionAction": "BUY|SELL|HOLD",
+  "visionConfidence": 72
+}
+
+patternStrength and visualScore are 1-10. visionConfidence is 0-99.`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: base64Img
+              }
+            },
+            { type: 'text', text: prompt }
+          ]
+        }]
+      })
+    });
+
+    const data  = await response.json();
+    const text  = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    const clean = text.replace(/```json|```/g, '').trim();
+    const analysis = JSON.parse(clean);
+
+    // Cache it
+    visionCache[cacheKey] = { analysis, timestamp: Date.now() };
+    console.log(`[VISION] ${dp}: ${analysis.visualPattern} → ${analysis.visionAction} ${analysis.visionConfidence}%`);
+    return analysis;
+
+  } catch(e) {
+    console.warn('[VISION] Analysis failed:', e.message);
+    return null;
+  }
+}
 // Runs current multi-indicator strategy over historical OHLC data
 // ══════════════════════════════════════════════════════════════
 app.post('/api/backtest', requireAuth, async (req, res) => {
