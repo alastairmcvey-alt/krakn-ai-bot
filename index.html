@@ -980,9 +980,12 @@ function renderDashboard() {
 
     <!-- Quick Actions -->
     <div style="padding:12px 18px 0">
-      <div class="quick-actions" style="padding:0">
-        <button class="qa-btn qa-buy"   onclick="quickTrade('buy')">▲ Buy ${s}</button>
-        <button class="qa-btn qa-sell"  onclick="quickTrade('sell')">▼ Sell ${s}</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+        <button class="qa-btn qa-buy"  onclick="quickTrade('buy')">▲ Buy ${s}</button>
+        <button class="qa-btn qa-sell" onclick="quickTrade('sell')">▼ Sell ${s}</button>
+        <button class="qa-btn qa-ai"   onclick="sendChartToTelegram('${selectedPair}')" style="background:rgba(34,158,217,0.1);border-color:rgba(34,158,217,0.3);color:#229ED9">📊 Chart→TG</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <button class="qa-btn qa-ai"    onclick="runAdvisorNow()">⚡ AI Update</button>
         <button class="qa-btn qa-alert" onclick="checkBuyNow()">🟢 Check Buys</button>
       </div>
@@ -1208,6 +1211,17 @@ async function loadOnChain(sym) {
   } catch(e) { el.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`; }
 }
 
+async function sendChartToTelegram(pair) {
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  showToast('📸 Rendering chart + vision analysis...');
+  try {
+    const res = await api(`/api/chart/telegram/${pair}`, { method:'POST' });
+    const v   = res.vision;
+    if (v) showToast(`✅ Chart sent! ${v.visualPattern} → ${v.visionAction}`);
+    else   showToast('✅ Chart sent to Telegram!');
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
 async function runAdvisorNow() {
   if (!serverOnline) { showToast('Server offline'); return; }
   try { await api('/api/advisor/run', {method:'POST'}); showToast('Analysing markets — check Telegram!'); }
@@ -1252,6 +1266,9 @@ async function loadAISignal(pair) {
       let html = `<div class="signal-reason" id="sigReason">${sig.reason||''}</div>`;
       if (sig.suggestedAmountAUD && sig.action !== 'HOLD') {
         html += `<div class="signal-suggestion">💰 ${fmtAUD(sig.suggestedAmountAUD)} suggested (${sig.suggestedPct}% of balance)</div>`;
+      }
+      if (sig.vision?.visualPattern && sig.vision.visualPattern !== 'No clear pattern') {
+        html += `<div style="font-size:10px;color:rgba(0,212,255,0.7);margin-top:4px;font-family:'Space Grotesk',sans-serif;font-weight:600">👁 ${sig.vision.visualPattern} · ${sig.vision.trendDirection}</div>`;
       }
       infoEl.innerHTML = html;
     }
