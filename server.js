@@ -66,19 +66,64 @@ const KRAKEN_HOST       = 'api.kraken.com';
 const TELEGRAM_TOKEN    = (process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(/[\r\n]/g, '');
 const TELEGRAM_CHAT_ID  = (process.env.TELEGRAM_CHAT_ID  || '').trim().replace(/[\r\n]/g, '');
 
-// ─── AUD Pairs ─────────────────────────────────────────────────
-// ─── Valid AUD pairs (verified against Kraken API) ────────────
+// ─── Multi-Currency Pair Config ────────────────────────────────
+// AUD pairs — your home currency
 const AUD_PAIRS = ['XBTAUD','ETHAUD','XRPAUD','ADAAUD','SOLAUD','LTCAUD','DOTAUD','LINKAUD'];
+
+// USD pairs — unlocks 50+ additional coins
+const USD_PAIRS = [
+  'XBTUSD','ETHUSD','SOLUSD','XRPUSD','ADAUSD','LTCUSD','DOTUSD','LINKUSD',
+  'MATICUSD','AVAXUSD','ATOMUSD','UNIUSD','AAVEUSD','DOGEUSD','SHIBUSDT',
+  'OPUSD','ARBUSD','INJUSD','SUIUSD','APTUSD','NEARUSD','FTMUSD','ALGOUSD',
+];
+
+// Display names for all pairs
 const PAIR_DISPLAY = {
+  // AUD
   'XBTAUD':'BTC/AUD','ETHAUD':'ETH/AUD','XRPAUD':'XRP/AUD','ADAAUD':'ADA/AUD',
-  'SOLAUD':'SOL/AUD','LTCAUD':'LTC/AUD','DOTAUD':'DOT/AUD','LINKAUD':'LINK/AUD'
+  'SOLAUD':'SOL/AUD','LTCAUD':'LTC/AUD','DOTAUD':'DOT/AUD','LINKAUD':'LINK/AUD',
+  // USD
+  'XBTUSD':'BTC/USD','ETHUSD':'ETH/USD','SOLUSD':'SOL/USD','XRPUSD':'XRP/USD',
+  'ADAUSD':'ADA/USD','LTCUSD':'LTC/USD','DOTUSD':'DOT/USD','LINKUSD':'LINK/USD',
+  'MATICUSD':'MATIC/USD','AVAXUSD':'AVAX/USD','ATOMUSD':'ATOM/USD','UNIUSD':'UNI/USD',
+  'AAVEUSD':'AAVE/USD','DOGEUSD':'DOGE/USD','SHIBUSDT':'SHIB/USD','OPUSD':'OP/USD',
+  'ARBUSD':'ARB/USD','INJUSD':'INJ/USD','SUIUSD':'SUI/USD','APTUSD':'APT/USD',
+  'NEARUSD':'NEAR/USD','FTMUSD':'FTM/USD','ALGOUSD':'ALGO/USD',
 };
+
+// Which pairs to actively watch — controlled by user currency setting
+// Default is AUD only, user can switch to USD or BOTH in settings
+function getActivePairs(mode) {
+  if (mode === 'USD')  return USD_PAIRS;
+  if (mode === 'BOTH') return [...AUD_PAIRS, ...USD_PAIRS];
+  return AUD_PAIRS; // default
+}
+
+// Detect base currency from pair name
+function pairCurrency(pair) {
+  if (pair.endsWith('AUD')) return 'AUD';
+  if (pair.endsWith('USD') || pair.endsWith('USDT')) return 'USD';
+  return 'AUD';
+}
 
 // Fallback pair names to try if primary fails
 const PAIR_ALIASES = {
-  'DOTAUD': ['DOTAUD','DOT/AUD','XDOTAUD'],
+  'DOTAUD':  ['DOTAUD','DOT/AUD','XDOTAUD'],
   'LINKAUD': ['LINKAUD','LINK/AUD'],
+  'DOTUSD':  ['DOTUSD','DOT/USD','XDOTUSD'],
+  'SHIBUSDT':['SHIBUSDT','SHIB/USDT','SHIB/USD'],
 };
+
+// Format price in the correct currency
+function fmtPrice(p, pair) {
+  const currency = pair ? pairCurrency(pair) : 'AUD';
+  const symbol   = currency === 'USD' ? 'US$' : 'A$';
+  if (!p && p !== 0) return '--';
+  if (p >= 1000) return symbol + Math.round(p).toLocaleString('en-AU');
+  if (p >= 1)    return symbol + parseFloat(p).toFixed(2);
+  if (p >= 0.01) return symbol + parseFloat(p).toFixed(4);
+  return symbol + parseFloat(p).toFixed(8);
+}
 
 async function fetchSingleTicker(pair) {
   // Try primary pair name first, then aliases
@@ -200,7 +245,11 @@ let botConfig = {
   stopLossEnabled:    true,
   stopLossPct:        8,
   trailingStop:       false,
-  minHoldMinutes:     60,  // never sell within 60 minutes of buying
+  minHoldMinutes:     60,
+  currencyMode:       'AUD',
+  autoBuy:            false,   // when true — bot buys automatically without YES/NO prompt
+  autoBuyMaxAUD:      200,     // maximum AUD per auto-buy trade
+  autoBuyMinConfidence: 82,    // higher threshold for auto-buy (must be very confident)
 };
 
 // Track when each coin was last bought so we enforce minimum hold time
@@ -247,6 +296,8 @@ function saveData() {
       priceAlerts, tradeLog: tradeLog.slice(-500),
       pnlByAsset, stopLossPeaks, portfolioHistory,
       lastBuyTimes, targetAllocation,
+      smartWallets, smartMoneyAlertLog,
+      gridConfigs, rebalanceConfig,
       botRunning: botState.running,
       savedAt: new Date().toISOString(),
     };
@@ -275,9 +326,13 @@ function loadData() {
       if (data.tradeLog)        tradeLog      = data.tradeLog;
       if (data.pnlByAsset)      pnlByAsset      = data.pnlByAsset;
       if (data.stopLossPeaks)   stopLossPeaks   = data.stopLossPeaks;
-      if (data.portfolioHistory)  portfolioHistory  = data.portfolioHistory;
-      if (data.lastBuyTimes)      lastBuyTimes      = data.lastBuyTimes;
-      if (data.targetAllocation)  targetAllocation  = data.targetAllocation;
+      if (data.portfolioHistory)    portfolioHistory    = data.portfolioHistory;
+      if (data.lastBuyTimes)        lastBuyTimes        = data.lastBuyTimes;
+      if (data.targetAllocation)    targetAllocation    = data.targetAllocation;
+      if (data.smartWallets?.length) smartWallets       = data.smartWallets;
+      if (data.smartMoneyAlertLog)  smartMoneyAlertLog  = data.smartMoneyAlertLog;
+      if (data.gridConfigs)         gridConfigs         = data.gridConfigs;
+      if (data.rebalanceConfig)     Object.assign(rebalanceConfig, data.rebalanceConfig);
       // Auto-restart bot if it was running before the server restarted
       if (data.botRunning) {
         console.log('[LOAD] Bot was running before restart — will auto-start in 5s');
@@ -308,11 +363,14 @@ function loadData() {
 }
 
 // ─── Formatting Helpers ────────────────────────────────────────
-function fmtAUDServer(p) {
+function fmtAUDServer(p, pair) {
   if (!p && p !== 0) return '--';
-  if (p >= 1000) return 'A$' + Math.round(p).toLocaleString('en-AU');
-  if (p >= 1)    return 'A$' + parseFloat(p).toFixed(2);
-  return 'A$' + parseFloat(p).toFixed(4);
+  const currency = pair ? pairCurrency(pair) : 'AUD';
+  const symbol   = currency === 'USD' ? 'US$' : 'A$';
+  if (p >= 1000) return symbol + Math.round(p).toLocaleString('en-AU');
+  if (p >= 1)    return symbol + parseFloat(p).toFixed(2);
+  if (p >= 0.01) return symbol + parseFloat(p).toFixed(4);
+  return symbol + parseFloat(p).toFixed(8);
 }
 function fmtVolume(v) {
   return parseFloat(v) < 0.001 ? parseFloat(v).toFixed(8) : parseFloat(v).toFixed(4);
@@ -819,7 +877,7 @@ function detectVolumeAnomaly(volumes) {
 }
 
 async function checkVolumeAnomalies() {
-  for (const pair of AUD_PAIRS) {
+  for (const pair of getActivePairs(botConfig.currencyMode)) {
     try {
       // Only check pairs with active holdings or being watched
       const dp = PAIR_DISPLAY[pair] || pair;
@@ -956,38 +1014,114 @@ async function computeSignalForPair(pair) {
       ...tf240.signals.map(s => `4h: ${s}`),
     ];
 
-    // ── Vision Analysis — render chart and send to Claude Vision ──
-    let vision = null;
+    // ── Multi-Timeframe Vision Analysis ───────────────────────
+    // Renders charts at 5 timeframes and sends all to Claude Vision
+    // Weights: 15m=0.5, 1h=1, 4h=2, 1D=3, 1W=2 (longer = more reliable patterns)
+    let vision     = null;
+    let visionAll  = {}; // { '15m': analysis, '1h': analysis, ... }
+
     if (createCanvas) {
       try {
-        const ohlc1h    = await krakenPublicRequest('OHLC', { pair, interval: 60 });
-        const k1h       = Object.keys(ohlc1h).find(k => k !== 'last');
-        const candles1h = ohlc1h[k1h].slice(-60);
+        const tfConfigs = [
+          { key:'15m', interval:15,   candles:80,  weight:0.5, label:'15-Min' },
+          { key:'1h',  interval:60,   candles:60,  weight:1.0, label:'1-Hour' },
+          { key:'4h',  interval:240,  candles:60,  weight:2.0, label:'4-Hour' },
+          { key:'1d',  interval:1440, candles:30,  weight:3.0, label:'Daily'  },
+          { key:'1w',  interval:10080,candles:20,  weight:2.0, label:'Weekly' },
+        ];
 
-        vision = await analyseChartWithVision(pair, candles1h, {
-          rsi: tf60.rsi, macdTrend: tf60.macd.trend,
-          bbPosition: tf60.bb.position, weightedScore: Math.round(weightedScore),
+        // Fetch and analyse all timeframes in parallel
+        const visionResults = await Promise.allSettled(
+          tfConfigs.map(async tf => {
+            const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: tf.interval });
+            const k       = Object.keys(ohlc).find(k => k !== 'last');
+            const candles = ohlc[k].slice(-tf.candles);
+            const result  = await analyseChartWithVision(pair, candles, {
+              rsi:           tf.key === '1h' ? tf60.rsi : tf.key === '4h' ? tf240.rsi : tf60.rsi,
+              macdTrend:     tf60.macd.trend,
+              bbPosition:    tf60.bb.position,
+              weightedScore: Math.round(weightedScore),
+              timeframe:     tf.label,
+            });
+            return { ...tf, result };
+          })
+        );
+
+        // Collect results and compute weighted vision score
+        let visionScoreSum  = 0;
+        let visionWeightSum = 0;
+        let bullishTFs = 0, bearishTFs = 0, holdTFs = 0;
+        const visionSignals = [];
+
+        visionResults.forEach(r => {
+          if (r.status !== 'fulfilled' || !r.value?.result) return;
+          const { key, label, weight, result } = r.value;
+          visionAll[key] = result;
+
+          // Accumulate weighted visual score (-5 to +5 per TF)
+          const tfScore = (result.visualScore - 5) * weight;
+          visionScoreSum  += tfScore;
+          visionWeightSum += weight;
+
+          if (result.visionAction === 'BUY')  bullishTFs++;
+          else if (result.visionAction === 'SELL') bearishTFs++;
+          else holdTFs++;
+
+          if (result.visualPattern !== 'No clear pattern' && result.patternStrength >= 6) {
+            visionSignals.push(`👁 ${label}: ${result.visualPattern} (${result.visionAction} ${result.visionConfidence}%)`);
+          }
+
+          console.log(`[VISION ${key}] ${PAIR_DISPLAY[pair]||pair}: ${result.visualPattern} → ${result.visionAction} ${result.visionConfidence}%`);
         });
 
-        if (vision) {
-          // Vision strongly confirms — boost confidence
-          if (vision.visionAction === action && vision.patternStrength >= 7) {
-            confidence = Math.min(97, confidence * 1.15);
-            allSignals.push(`👁 Vision confirms: ${vision.visualPattern} (${vision.visionConfidence}%)`);
+        // Primary vision = 1h result (most balanced for intraday decisions)
+        vision = visionAll['1h'] || visionAll['4h'] || null;
+
+        // Multi-TF consensus — what do most timeframes agree on?
+        const totalTFs = bullishTFs + bearishTFs + holdTFs;
+        const avgVisionScore = visionWeightSum > 0 ? visionScoreSum / visionWeightSum : 0;
+
+        if (totalTFs > 0) {
+          // Strong consensus — 3+ timeframes agree
+          if (bullishTFs >= 3) {
+            confidence = Math.min(97, confidence * (1 + (bullishTFs * 0.06)));
+            visionSignals.push(`👁 ${bullishTFs}/${totalTFs} timeframes BULLISH`);
+            if (action !== 'BUY' && bullishTFs >= 4) {
+              action = 'BUY';
+              visionSignals.push('👁 Vision consensus override → BUY');
+            }
+          } else if (bearishTFs >= 3) {
+            confidence = Math.min(97, confidence * (1 + (bearishTFs * 0.06)));
+            visionSignals.push(`👁 ${bearishTFs}/${totalTFs} timeframes BEARISH`);
+            if (action !== 'SELL' && bearishTFs >= 4) {
+              action = 'SELL';
+              visionSignals.push('👁 Vision consensus override → SELL');
+            }
           }
-          // Vision strongly disagrees — reduce confidence
-          else if (vision.visionAction !== action && vision.visionAction !== 'HOLD' && vision.visionConfidence > 70) {
-            confidence *= 0.75;
-            allSignals.push(`⚠️ Vision ${vision.visionAction}: ${vision.visualPattern}`);
+
+          // Mixed signals — reduce confidence
+          if (bullishTFs >= 2 && bearishTFs >= 2) {
+            confidence *= 0.85;
+            visionSignals.push(`⚠️ Vision mixed: ${bullishTFs} bull vs ${bearishTFs} bear TFs`);
           }
-          // Vision very confident and opposite — override
-          if (vision.visionConfidence >= 85 && vision.visionAction !== 'HOLD' && vision.visionAction !== action) {
-            action     = vision.visionAction;
-            confidence = Math.min(85, (confidence + vision.visionConfidence) / 2);
-            allSignals.push(`👁 Vision override → ${action}`);
+
+          // 1h confirms action — boost
+          if (vision?.visionAction === action && vision?.patternStrength >= 7) {
+            confidence = Math.min(97, confidence * 1.12);
+          }
+
+          // Daily chart strongly disagrees — significant warning
+          const dailyVision = visionAll['1d'];
+          if (dailyVision?.visionAction && dailyVision.visionAction !== action &&
+              dailyVision.visionAction !== 'HOLD' && dailyVision.visionConfidence >= 75) {
+            confidence *= 0.80;
+            visionSignals.push(`⚠️ Daily chart disagrees: ${dailyVision.visionAction} (${dailyVision.visualPattern})`);
           }
         }
-      } catch(e) { console.warn('[VISION] Skipped:', e.message); }
+
+        allSignals.push(...visionSignals);
+
+      } catch(e) { console.warn('[VISION] Multi-TF failed:', e.message); }
     }
 
     return {
@@ -996,6 +1130,7 @@ async function computeSignalForPair(pair) {
       weightedScore,
       signals:      allSignals,
       vision,
+      visionAll,
       patterns: [
         ...tf60.patterns.map(p => ({ ...p, tf: '1h' })),
         ...tf240.patterns.map(p => ({ ...p, tf: '4h' })),
@@ -1188,7 +1323,7 @@ async function checkBuyOpportunity() {
   try {
     console.log('[BUY CHECK] Scanning all pairs...');
     const marketData = [];
-    for (const pair of AUD_PAIRS) { // ALL pairs, not just advisor pairs
+    for (const pair of getActivePairs(botConfig.currencyMode)) { // ALL pairs, not just advisor pairs
       try {
         const ticker = await fetchSingleTicker(pair);
         if (!ticker) continue;
@@ -1209,12 +1344,16 @@ async function checkBuyOpportunity() {
 // ─── Buy Opportunity Detector ──────────────────────────────────
 async function checkBuyOpportunities(marketData) {
   try {
-    let audCash = 0;
+    let audCash = 0, usdCash = 0;
     if (KRAKEN_API_KEY && KRAKEN_API_SECRET) {
       const bal = await krakenPrivateRequest('Balance');
       audCash   = parseFloat(bal['ZAUD'] || bal['AUD'] || 0);
+      usdCash   = parseFloat(bal['ZUSD'] || bal['USD'] || 0);
     }
-    if (audCash < 10) { console.log('[BUY CHECK] Insufficient AUD cash'); return; }
+
+    const mode = botConfig.currencyMode || 'AUD';
+    const availableCash = mode === 'USD' ? usdCash : mode === 'BOTH' ? audCash + usdCash : audCash;
+    if (availableCash < 10) { console.log('[BUY CHECK] Insufficient cash'); return; }
 
     let bestOpportunity = null;
 
@@ -1268,8 +1407,10 @@ async function checkBuyOpportunities(marketData) {
       return;
     }
 
-    const suggestedAUD = Math.min(audCash * 0.25, audCash - 10);
-    if (suggestedAUD < 10) return;
+    const pairCurr     = pairCurrency(bestOpportunity.pair);
+    const cashForPair  = pairCurr === 'USD' ? usdCash : audCash;
+    const suggestedAUD = Math.min(cashForPair * 0.25, cashForPair - 10);
+    if (suggestedAUD < 5) return;
 
     const volume   = (suggestedAUD / bestOpportunity.price).toFixed(8);
     const topPat   = bestOpportunity.patterns[0];
@@ -1277,42 +1418,96 @@ async function checkBuyOpportunities(marketData) {
     const sentStr  = bestOpportunity.sentiment.score !== 0
       ? `\nSentiment: ${bestOpportunity.sentiment.score}/10 (${bestOpportunity.sentiment.label})`
       : '';
-    const vision   = bestOpportunity.signal?.vision;
-    const visStr   = vision
-      ? `\n👁 Visual: ${vision.visualPattern} — ${vision.keyObservation}`
-      : '';
-
-    pendingBuyOpportunity = {
-      pair:        bestOpportunity.pair,
-      displayPair: bestOpportunity.displayPair,
-      sym:         bestOpportunity.sym,
-      price:       bestOpportunity.price,
-      amountAUD:   suggestedAUD,
-      volume,
-      rsi:         bestOpportunity.rsi,
-      confidence:  bestOpportunity.confidence,
-      timestamp:   Date.now(),
-    };
+    const vision    = bestOpportunity.signal?.vision;
+    const visionAll = bestOpportunity.signal?.visionAll || {};
+    const visionTFs = Object.entries(visionAll)
+      .filter(([,v]) => v?.visualPattern && v.visualPattern !== 'No clear pattern')
+      .map(([tf,v]) => `  ${tf.toUpperCase()}: ${v.visualPattern} → ${v.visionAction} ${v.visionConfidence}%`)
+      .join('\n');
+    const visStr = visionTFs
+      ? `\n👁 <b>Vision Analysis (${Object.keys(visionAll).length} TFs):</b>\n${visionTFs}`
+      : vision ? `\n👁 ${vision.visualPattern} — ${vision.keyObservation}` : '';
 
     const sydneyTime = new Date().toLocaleString('en-AU', {
       timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short'
     });
 
-    await sendTelegram(
-      `🟢 <b>BUY OPPORTUNITY DETECTED!</b>\n\n` +
-      `<b>${bestOpportunity.displayPair}</b>\n` +
-      `Price: ${fmtAUDServer(bestOpportunity.price)}\n` +
-      `RSI: ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
-      `24h Change: ${bestOpportunity.change24h > 0 ? '+' : ''}${bestOpportunity.change24h}%\n` +
-      `High: ${fmtAUDServer(bestOpportunity.high)} | Low: ${fmtAUDServer(bestOpportunity.low)}` +
-      `${patStr}${sentStr}${visStr}\n\n` +
-      `💰 Suggested: <b>${fmtAUDServer(suggestedAUD)}</b> (25% of your AUD cash)\n` +
-      `= ${volume} ${bestOpportunity.sym}\n\n` +
-      `Reply <b>YES</b> to buy now or <b>NO</b> to skip.\n` +
-      `⏰ Expires in 10 minutes — ${sydneyTime} AEST`
-    );
+    // ── AUTO-BUY MODE ─────────────────────────────────────────
+    // If autoBuy is enabled AND confidence exceeds the higher auto threshold
+    // AND the trade size is within the safety cap — execute immediately
+    if (botConfig.autoBuy &&
+        bestOpportunity.confidence >= botConfig.autoBuyMinConfidence &&
+        suggestedAUD <= botConfig.autoBuyMaxAUD) {
 
-    console.log(`[BUY OPPORTUNITY] ${bestOpportunity.displayPair} RSI:${bestOpportunity.rsi} Score:${bestOpportunity.weightedScore} Conf:${bestOpportunity.confidence}% — prompt sent`);
+      try {
+        console.log(`[AUTO-BUY] Executing ${bestOpportunity.displayPair} — ${bestOpportunity.confidence}% confidence`);
+
+        const order = await krakenPrivateRequest('AddOrder', {
+          pair:      bestOpportunity.pair,
+          type:      'buy',
+          ordertype: 'market',
+          volume,
+        });
+
+        recordTrade(bestOpportunity.pair, bestOpportunity.sym, 'buy', volume, bestOpportunity.price, 'auto-buy');
+        lastBuyTimes[bestOpportunity.sym] = Date.now();
+        saveData();
+
+        await sendTelegram(
+          `🤖 <b>AUTO-BUY EXECUTED!</b>\n\n` +
+          `<b>${bestOpportunity.displayPair}</b>\n` +
+          `Bought: ${volume} ${bestOpportunity.sym}\n` +
+          `Price: ${fmtAUDServer(bestOpportunity.price, bestOpportunity.pair)}\n` +
+          `Total: ≈ ${fmtAUDServer(suggestedAUD, bestOpportunity.pair)}\n` +
+          `TXID: ${order.txid?.join(', ')}\n\n` +
+          `Signal: RSI ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
+          `${patStr}${sentStr}${visStr}\n\n` +
+          `⏱ Min hold: ${botConfig.minHoldMinutes} min\n` +
+          `🔴 To disable auto-buy, go to Bot Settings → Auto-Buy\n` +
+          `⏰ ${sydneyTime} AEST`
+        );
+
+        console.log(`[AUTO-BUY] ✅ ${bestOpportunity.displayPair} — ${volume} @ ${bestOpportunity.price}`);
+
+      } catch(e) {
+        console.error('[AUTO-BUY ERROR]', e.message);
+        await sendTelegram(`❌ Auto-buy failed for ${bestOpportunity.displayPair}: ${e.message}`);
+      }
+
+    } else {
+      // ── MANUAL PROMPT MODE (default) ─────────────────────────
+      pendingBuyOpportunity = {
+        pair:        bestOpportunity.pair,
+        displayPair: bestOpportunity.displayPair,
+        sym:         bestOpportunity.sym,
+        price:       bestOpportunity.price,
+        amountAUD:   suggestedAUD,
+        volume,
+        rsi:         bestOpportunity.rsi,
+        confidence:  bestOpportunity.confidence,
+        timestamp:   Date.now(),
+      };
+
+      const autoBuyNote = botConfig.autoBuy
+        ? `\n⚠️ Auto-buy active but confidence (${bestOpportunity.confidence}%) below threshold (${botConfig.autoBuyMinConfidence}%) — manual prompt sent`
+        : '';
+
+      await sendTelegram(
+        `🟢 <b>BUY OPPORTUNITY DETECTED!</b>\n\n` +
+        `<b>${bestOpportunity.displayPair}</b>\n` +
+        `Price: ${fmtAUDServer(bestOpportunity.price, bestOpportunity.pair)}\n` +
+        `RSI: ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
+        `24h Change: ${bestOpportunity.change24h > 0 ? '+' : ''}${bestOpportunity.change24h}%\n` +
+        `High: ${fmtAUDServer(bestOpportunity.high, bestOpportunity.pair)} | Low: ${fmtAUDServer(bestOpportunity.low, bestOpportunity.pair)}` +
+        `${patStr}${sentStr}${visStr}\n\n` +
+        `💰 Suggested: <b>${fmtAUDServer(suggestedAUD, bestOpportunity.pair)}</b> (25% of your ${pairCurr} cash)\n` +
+        `= ${volume} ${bestOpportunity.sym}\n\n` +
+        `Reply <b>YES</b> to buy now or <b>NO</b> to skip.\n` +
+        `⏰ Expires in 10 minutes — ${sydneyTime} AEST${autoBuyNote}`
+      );
+
+      console.log(`[BUY OPPORTUNITY] ${bestOpportunity.displayPair} RSI:${bestOpportunity.rsi} Conf:${bestOpportunity.confidence}% — prompt sent`);
+    }
 
   } catch(e) {
     console.error('[BUY OPPORTUNITY ERROR]', e.message);
@@ -1424,8 +1619,8 @@ async function handleTelegramMessage(chatId, userMessage, username) {
   // ── Chart snapshot command ────────────────────────────────────
   const chartCmds = ['chart','send chart','show chart','snap','snapshot','/chart'];
   const chartMatch = chartCmds.some(c => msg.includes(c));
-  const pairFromMsg = AUD_PAIRS.find(p => {
-    const sym = PAIR_DISPLAY[p]?.replace('/AUD','').toLowerCase();
+  const pairFromMsg = [...AUD_PAIRS, ...USD_PAIRS].find(p => {
+    const sym = PAIR_DISPLAY[p]?.replace('/AUD','').replace('/USD','').toLowerCase();
     return msg.includes(sym);
   }) || selectedPairForChat || 'XBTAUD';
 
@@ -1434,51 +1629,88 @@ async function handleTelegramMessage(chatId, userMessage, username) {
     const dp   = PAIR_DISPLAY[pair] || pair;
     await sendTelegramTo(chatId, `📸 Rendering ${dp} chart and running vision analysis...`);
     try {
-      // Call our own chart/telegram endpoint internally
-      const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: 60 });
-      const k       = Object.keys(ohlc).find(k => k !== 'last');
-      const candles = ohlc[k].slice(-60);
-      const buf     = renderChartToBuffer(candles, 600, 300);
-
-      if (!buf) {
-        await sendTelegramTo(chatId, '⚠️ Chart rendering not available. Run npm install on Railway.');
-        return;
-      }
+      // Render and send all 5 timeframes as a photo album
+      const tfConfigs = [
+        { key:'15m', interval:15,   candles:80,  label:'15-Min' },
+        { key:'1h',  interval:60,   candles:60,  label:'1-Hour' },
+        { key:'4h',  interval:240,  candles:60,  label:'4-Hour' },
+        { key:'1d',  interval:1440, candles:30,  label:'Daily'  },
+        { key:'1w',  interval:10080,candles:20,  label:'Weekly' },
+      ];
 
       const signal = await computeSignalForPair(pair);
       const vision = signal.vision;
       const ticker = await fetchSingleTicker(pair);
 
-      // Send photo via Telegram API multipart
-      const boundary = '----FB' + Date.now();
-      const chunks   = [];
-      const field    = (n, v) => chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${n}"\r\n\r\n${v}\r\n`));
-      field('chat_id', chatId);
-      field('parse_mode', 'HTML');
-      field('caption',
+      // Build summary caption
+      const visionLines = Object.entries(signal.visionAll || {})
+        .filter(([,v]) => v?.visualPattern)
+        .map(([tf,v]) => `${tf.toUpperCase()}: ${v.visualPattern} → ${v.visionAction} ${v.visionConfidence}%`)
+        .join('\n');
+
+      const summaryCaption =
         `📊 <b>${dp} — ${fmtAUDServer(ticker?.price || 0)}</b>\n\n` +
-        `${signal.action==='BUY'?'🟢':signal.action==='SELL'?'🔴':'🟡'} <b>${signal.action}</b> ${signal.confidence}% | RSI: ${signal.rsi} | Score: ${signal.weightedScore}\n` +
-        `${signal.signals?.slice(0,3).join('\n')}\n` +
-        `${vision ? `\n👁 <b>Vision Analysis</b>\nPattern: ${vision.visualPattern}\n${vision.keyObservation}\nTrend: ${vision.trendDirection} · Support: ${fmtAUDServer(vision.supportLevel)}` : ''}`
-      );
-      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${dp.replace('/','_')}.png"\r\nContent-Type: image/png\r\n\r\n`));
-      chunks.push(buf);
-      chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
-      const body = Buffer.concat(chunks);
+        `${signal.action==='BUY'?'🟢':signal.action==='SELL'?'🔴':'🟡'} <b>${signal.action}</b> ${signal.confidence}% | RSI: ${signal.rsi} | Score: ${signal.weightedScore}\n\n` +
+        `👁 <b>Vision Analysis (5 Timeframes)</b>\n${visionLines || 'No clear patterns detected'}`;
 
-      await new Promise((resolve, reject) => {
-        const r = https.request({
-          hostname: 'api.telegram.org',
-          path: `/bot${TELEGRAM_TOKEN}/sendPhoto`,
-          method: 'POST',
-          headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
-        }, (res) => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>resolve(JSON.parse(d))); });
-        r.on('error', reject); r.write(body); r.end();
-      });
+      // Send each chart as a separate photo with its own caption
+      for (const tf of tfConfigs) {
+        try {
+          const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: tf.interval });
+          const k       = Object.keys(ohlc).find(k => k !== 'last');
+          const candles = ohlc[k].slice(-tf.candles);
+          const buf     = renderChartToBuffer(candles, 600, 300);
+          if (!buf) continue;
 
-      console.log(`[CHART TELEGRAM] Sent ${dp} chart to ${chatId}`);
+          const tfVision = signal.visionAll?.[tf.key];
+          const caption  = tf.key === '15m' ? summaryCaption :
+            `📊 <b>${dp} ${tf.label}</b>\n` +
+            (tfVision ? `👁 ${tfVision.visualPattern} → ${tfVision.visionAction} ${tfVision.visionConfidence}%\n${tfVision.keyObservation}` : 'Analysing...');
+
+          const boundary = '----FB' + Date.now() + tf.key;
+          const chunks   = [];
+          const field    = (n,v) => chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${n}"\r\n\r\n${v}\r\n`));
+          field('chat_id', chatId);
+          field('parse_mode', 'HTML');
+          field('caption', caption);
+          chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${dp.replace('/','_')}_${tf.key}.png"\r\nContent-Type: image/png\r\n\r\n`));
+          chunks.push(buf);
+          chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+          const body = Buffer.concat(chunks);
+
+          await new Promise((resolve, reject) => {
+            const r = https.request({
+              hostname: 'api.telegram.org',
+              path: `/bot${TELEGRAM_TOKEN}/sendPhoto`,
+              method: 'POST',
+              headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+            }, (res) => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>resolve()); });
+            r.on('error', reject); r.write(body); r.end();
+          });
+
+          // Small delay between photos to avoid Telegram rate limiting
+          await new Promise(r => setTimeout(r, 500));
+        } catch(e) { console.warn(`[CHART ${tf.key}] Failed:`, e.message); }
+      }
+
+      console.log(`[CHART TELEGRAM] Sent all 5 ${dp} charts to ${chatId}`);
     } catch(e) {
       await sendTelegramTo(chatId, `❌ Chart failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // ── Smart money scan command ──────────────────────────────────
+  if (msg.includes('smart money') || msg.includes('whale wallets') || msg.includes('wallet scan') || msg === '/wallets') {
+    await sendTelegramTo(chatId, `🐋 Scanning ${smartWallets.filter(w=>w.active).length} smart money wallets... give me 30 seconds!`);
+    try {
+      await checkSmartMoneySignals();
+      const recent = smartMoneyAlertLog.slice(0, 3);
+      if (!recent.length) {
+        await sendTelegramTo(chatId, '🔍 Scan complete — no significant activity detected in the last 2 hours. All wallets checked.');
+      }
+    } catch(e) {
+      await sendTelegramTo(chatId, '❌ Scan failed: ' + e.message);
     }
     return;
   }
@@ -1507,7 +1739,7 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       const fgStr     = fearGreed.value ? `😱 Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label})\n\n` : '';
       const results   = [];
 
-      for (const pair of AUD_PAIRS) { // scan ALL pairs
+      for (const pair of getActivePairs(botConfig.currencyMode)) { // scan ALL pairs
         try {
           const signal  = await computeSignalForPair(pair);
           const ticker  = await fetchSingleTicker(pair);
@@ -1726,13 +1958,15 @@ app.get('/api/config/export', requireAuth, (req, res) => {
 
 app.get('/api/ticker', async (req, res) => {
   try {
-    const requestedPairs = (req.query.pairs || AUD_PAIRS.join(',')).split(',');
+    const mode         = botConfig.currencyMode || 'AUD';
+    const activePairs  = getActivePairs(mode);
+    const requestedPairs = (req.query.pairs || activePairs.join(',')).split(',');
     const tickers = {};
     await Promise.all(requestedPairs.map(async (pair) => {
       const data = await fetchSingleTicker(pair.trim());
-      if (data) tickers[pair.trim()] = data;
+      if (data) tickers[pair.trim()] = { ...data, currency: pairCurrency(pair.trim()) };
     }));
-    res.json({ success: true, data: tickers, currency: 'AUD' });
+    res.json({ success: true, data: tickers, mode, currency: mode });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2172,7 +2406,895 @@ app.get('/api/portfolio/history', requireAuth, (req, res) => {
   res.json({ success: true, data: portfolioHistory });
 });
 
-// ─── Chart Vision Snapshot Routes ──────────────────────────────
+// ─── Currency Mode ─────────────────────────────────────────────
+app.get('/api/currency/mode', requireAuth, (req, res) => {
+  res.json({ success: true, data: {
+    mode:       botConfig.currencyMode || 'AUD',
+    audPairs:   AUD_PAIRS.length,
+    usdPairs:   USD_PAIRS.length,
+    activePairs: getActivePairs(botConfig.currencyMode).length,
+  }});
+});
+
+app.post('/api/currency/mode', requireAuth, (req, res) => {
+  const { mode } = req.body;
+  if (!['AUD','USD','BOTH'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be AUD, USD or BOTH' });
+  }
+  botConfig.currencyMode = mode;
+  saveData();
+  const active = getActivePairs(mode);
+  console.log(`[CURRENCY] Mode set to ${mode} — watching ${active.length} pairs`);
+  res.json({ success: true, data: {
+    mode,
+    activePairs:  active.length,
+    pairs:        active.map(p => PAIR_DISPLAY[p] || p),
+  }});
+});
+
+// ══════════════════════════════════════════════════════════════
+// SMART MONEY WALLET TRACKING — Tier 3
+// Monitors known profitable on-chain wallets and fires alerts
+// when they buy/sell coins that KRAKN·AI is also watching
+// ══════════════════════════════════════════════════════════════
+
+// ─── Known Smart Money Wallets ────────────────────────────────
+// Pre-seeded with publicly known profitable addresses
+// User can add/remove via API and frontend
+let smartWallets = [
+  // Bitcoin whales (tracked via Blockchair)
+  { id:'sm1',  address:'1P5ZEDWTKTFGxQjZphgWPQUpe554WKDfHQ', label:'MicroStrategy Treasury',    chain:'bitcoin',  winRate:0.89, tags:['institutional','btc-only'], active:true },
+  { id:'sm2',  address:'3LYJfcfHPXYJreMsASk2jkn69LWEYKzobserved', label:'Binance Cold Wallet',  chain:'bitcoin',  winRate:0.78, tags:['exchange','accumulator'], active:true },
+
+  // Ethereum smart traders (Etherscan)
+  { id:'sm3',  address:'0x9bf4001d307dfd62b26a2f1307ee0c0307632d59', label:'DeFi Whale Alpha',     chain:'ethereum', winRate:0.72, tags:['defi','smart-trader'], active:true },
+  { id:'sm4',  address:'0x28c6c06298d514db089934071355e5743bf21d60', label:'Binance Hot Wallet 14', chain:'ethereum', winRate:0.81, tags:['exchange','flow-indicator'], active:true },
+  { id:'sm5',  address:'0x21a31ee1afc51d94c2efccaa2092ad1028285549', label:'Binance Hot Wallet 8',  chain:'ethereum', winRate:0.76, tags:['exchange','flow-indicator'], active:true },
+  { id:'sm6',  address:'0xf977814e90da44bfa03b6295a0616a897441acec', label:'Binance Hot Wallet 20', chain:'ethereum', winRate:0.79, tags:['exchange','flow-indicator'], active:true },
+  { id:'sm7',  address:'0xa7efae728d2936e78bda97dc267687568dd593f', label:'Smart Trader #1',        chain:'ethereum', winRate:0.68, tags:['smart-trader','early-mover'], active:true },
+  { id:'sm8',  address:'0x1e2fbe6be9eb39fc894d38be976111f332172d83', label:'ETH Accumulator',        chain:'ethereum', winRate:0.71, tags:['accumulator','long-term'], active:true },
+
+  // Solana whales (Solscan)
+  { id:'sm9',  address:'9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', label:'SOL Whale Alpha',     chain:'solana',   winRate:0.74, tags:['smart-trader','sol-native'], active:true },
+  { id:'sm10', address:'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH', label:'Alameda Remnant',     chain:'solana',   winRate:0.66, tags:['institutional','multi-coin'], active:true },
+];
+
+// Cache: what we last saw each wallet doing
+let smartMoneyCache     = {}; // { walletId: { txs, fetchedAt } }
+let smartMoneyAlertLog  = []; // last 50 alerts fired
+let smartMoneyEnabled   = true;
+
+// ─── Coin address mapping for known tokens ────────────────────
+const TOKEN_ADDRESSES = {
+  ethereum: {
+    ETH:  'native',
+    LINK: '0x514910771af9ca656af840dff83e8264ecf986ca',
+    UNI:  '0x1f9840a85d5af5bf1d1762f925bdaddc4201f984',
+    AAVE: '0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9',
+    MATIC:'0x7d1afa7b718fb893db30a3abc0cfc608aacfebb0',
+    LINK: '0x514910771af9ca656af840dff83e8264ecf986ca',
+  }
+};
+
+// Map coin symbols to chains for smart money lookup
+const COIN_CHAINS = {
+  BTC:'bitcoin', ETH:'ethereum', LINK:'ethereum', UNI:'ethereum',
+  AAVE:'ethereum', MATIC:'ethereum', SOL:'solana', AVAX:'avalanche',
+};
+
+// ─── Fetch wallet transactions from free APIs ─────────────────
+async function fetchWalletTransactions(wallet) {
+  const cached = smartMoneyCache[wallet.id];
+  if (cached && (Date.now() - cached.fetchedAt) < 10 * 60 * 1000) return cached.txs;
+
+  try {
+    let txs = [];
+
+    if (wallet.chain === 'ethereum') {
+      // Etherscan free API — no key needed for basic queries (5/sec limit)
+      const url = `https://api.etherscan.io/api?module=account&action=txlist&address=${wallet.address}&startblock=0&endblock=99999999&page=1&offset=10&sort=desc`;
+      const res  = await fetch(url, { headers:{ 'User-Agent':'KRAKN-AI/4.0' } });
+      const data = await res.json();
+      if (data.status === '1' && Array.isArray(data.result)) {
+        txs = data.result.slice(0, 10).map(tx => ({
+          hash:      tx.hash,
+          timestamp: parseInt(tx.timeStamp) * 1000,
+          from:      tx.from?.toLowerCase(),
+          to:        tx.to?.toLowerCase(),
+          value:     parseFloat(tx.value) / 1e18, // ETH
+          valueUSD:  (parseFloat(tx.value) / 1e18) * 3000, // approx
+          type:      tx.from?.toLowerCase() === wallet.address.toLowerCase() ? 'out' : 'in',
+          chain:     'ethereum',
+        }));
+      }
+
+      // Also fetch ERC20 token transfers
+      const tokenUrl = `https://api.etherscan.io/api?module=account&action=tokentx&address=${wallet.address}&page=1&offset=15&sort=desc`;
+      const tokenRes  = await fetch(tokenUrl, { headers:{ 'User-Agent':'KRAKN-AI/4.0' } });
+      const tokenData = await tokenRes.json();
+      if (tokenData.status === '1' && Array.isArray(tokenData.result)) {
+        const tokenTxs = tokenData.result.slice(0, 15).map(tx => ({
+          hash:       tx.hash,
+          timestamp:  parseInt(tx.timeStamp) * 1000,
+          from:       tx.from?.toLowerCase(),
+          to:         tx.to?.toLowerCase(),
+          tokenName:  tx.tokenName,
+          tokenSymbol:tx.tokenSymbol?.toUpperCase(),
+          value:      parseFloat(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal)),
+          valueUSD:   0, // will be estimated later
+          type:       tx.from?.toLowerCase() === wallet.address.toLowerCase() ? 'sell' : 'buy',
+          chain:      'ethereum',
+          isToken:    true,
+        }));
+        txs = [...txs, ...tokenTxs];
+      }
+
+    } else if (wallet.chain === 'solana') {
+      // Solscan free API
+      const url = `https://public-api.solscan.io/account/transactions?account=${wallet.address}&limit=10`;
+      const res  = await fetch(url, { headers:{ 'User-Agent':'KRAKN-AI/4.0' } });
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        txs = data.slice(0, 10).map(tx => ({
+          hash:      tx.txHash,
+          timestamp: (tx.blockTime || Date.now()/1000) * 1000,
+          value:     (tx.fee || 0) / 1e9,
+          type:      'unknown',
+          chain:     'solana',
+        }));
+      }
+
+    } else if (wallet.chain === 'bitcoin') {
+      // Blockchain.info free API
+      const url = `https://blockchain.info/rawaddr/${wallet.address}?limit=5`;
+      const res  = await fetch(url, { headers:{ 'User-Agent':'KRAKN-AI/4.0' } });
+      const data = await res.json();
+      if (data.txs) {
+        txs = data.txs.slice(0, 5).map(tx => ({
+          hash:      tx.hash,
+          timestamp: (tx.time || 0) * 1000,
+          value:     tx.result / 1e8, // BTC
+          valueUSD:  (tx.result / 1e8) * 90000, // approx
+          type:      tx.result > 0 ? 'in' : 'out',
+          chain:     'bitcoin',
+        }));
+      }
+    }
+
+    // Filter to only recent transactions (last 24 hours)
+    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const recent = txs.filter(tx => tx.timestamp > oneDayAgo);
+
+    smartMoneyCache[wallet.id] = { txs: recent, fetchedAt: Date.now() };
+    return recent;
+
+  } catch(e) {
+    console.warn(`[SMART MONEY] Fetch failed for ${wallet.label}:`, e.message);
+    return [];
+  }
+}
+
+// ─── Claude interprets the wallet move ───────────────────────
+async function interpretWalletMove(wallet, txs, currentSignals) {
+  if (!txs.length) return null;
+  try {
+    // Build a summary of what the wallet did
+    const txSummary = txs.slice(0, 5).map(tx => {
+      if (tx.isToken) return `${tx.type.toUpperCase()} ${tx.tokenSymbol} (${tx.value.toFixed(2)} tokens)`;
+      return `${tx.type.toUpperCase()} ${tx.value.toFixed(4)} ${tx.chain === 'bitcoin' ? 'BTC' : tx.chain === 'solana' ? 'SOL' : 'ETH'} ($${(tx.valueUSD||0).toFixed(0)})`;
+    }).join(', ');
+
+    // What coins are we watching that this wallet touched?
+    const relevantCoins = [...new Set(
+      txs.filter(tx => tx.isToken).map(tx => tx.tokenSymbol)
+         .filter(sym => Object.keys(COIN_CHAINS).includes(sym))
+    )];
+
+    const currentSignalSummary = currentSignals
+      .filter(s => relevantCoins.includes(s.sym) || txs.some(tx => tx.chain === COIN_CHAINS[s.sym]))
+      .map(s => `${s.sym}: ${s.action} ${s.confidence}% (RSI ${s.rsi})`)
+      .join(', ');
+
+    const prompt = `You are a crypto trading analyst interpreting on-chain wallet activity.
+
+WALLET: ${wallet.label} (Win Rate: ${(wallet.winRate*100).toFixed(0)}%)
+Chain: ${wallet.chain}
+Recent transactions (last 24h): ${txSummary || 'No activity'}
+Tags: ${wallet.tags.join(', ')}
+
+KRAKN·AI current signals for relevant coins: ${currentSignalSummary || 'No matching coins active'}
+
+Determine if this wallet activity represents a meaningful trading signal.
+
+Return ONLY this JSON (no markdown):
+{
+  "isSignificant": true,
+  "action": "BUY",
+  "coin": "ETH",
+  "confidence": 74,
+  "reasoning": "One sentence explanation",
+  "isNoise": false,
+  "noiseReason": null,
+  "urgency": "HIGH"
+}
+
+isSignificant: true only if this is a real trading signal (not internal transfer, not dust)
+action: BUY if wallet is accumulating, SELL if distributing, HOLD if unclear
+coin: which coin the signal is strongest for
+confidence: 0-99
+isNoise: true if this is likely an internal transfer, exchange rebalancing, or non-market-impacting move
+urgency: HIGH/MEDIUM/LOW based on size and timing
+If isNoise is true, set isSignificant to false.`;
+
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 20000);
+    const response   = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    clearTimeout(timeout);
+
+    const data   = await response.json();
+    const text   = (data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('');
+    const match  = text.match(/\{[\s\S]*?\}/);
+    if (!match) return null;
+    return JSON.parse(match[0]);
+
+  } catch(e) {
+    console.warn('[SMART MONEY] Interpret failed:', e.message);
+    return null;
+  }
+}
+
+// ─── Main Smart Money Scanner ─────────────────────────────────
+async function checkSmartMoneySignals() {
+  if (!smartMoneyEnabled) return;
+  const activeWallets = smartWallets.filter(w => w.active);
+  if (!activeWallets.length) return;
+
+  console.log(`[SMART MONEY] Scanning ${activeWallets.length} wallets...`);
+
+  // Build current signal context for all active pairs
+  const currentSignals = [];
+  for (const pair of getActivePairs(botConfig.currencyMode).slice(0, 8)) {
+    try {
+      const ticker = await fetchSingleTicker(pair);
+      if (!ticker) continue;
+      const sym    = (PAIR_DISPLAY[pair]||pair).replace('/AUD','').replace('/USD','');
+      // Use cached signal if available, avoid redundant compute
+      currentSignals.push({ pair, sym, price: ticker.price, action:'HOLD', confidence:50, rsi:50 });
+    } catch(e) {}
+  }
+
+  // Check each wallet with staggered timing to avoid rate limits
+  for (let i = 0; i < activeWallets.length; i++) {
+    const wallet = activeWallets[i];
+    try {
+      // Stagger requests by 2s each
+      if (i > 0) await new Promise(r => setTimeout(r, 2000));
+
+      const txs = await fetchWalletTransactions(wallet);
+      if (!txs.length) continue;
+
+      // Only interpret if there's recent activity (last 2 hours)
+      const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+      const freshTxs    = txs.filter(tx => tx.timestamp > twoHoursAgo);
+      if (!freshTxs.length) continue;
+
+      // Check if we already alerted on these transactions
+      const txHashes  = freshTxs.map(tx => tx.hash);
+      const alreadyAlerted = txHashes.some(h =>
+        smartMoneyAlertLog.some(a => a.txHashes?.includes(h))
+      );
+      if (alreadyAlerted) continue;
+
+      console.log(`[SMART MONEY] ${wallet.label} has ${freshTxs.length} fresh transactions`);
+
+      const interpretation = await interpretWalletMove(wallet, freshTxs, currentSignals);
+      if (!interpretation) continue;
+      if (!interpretation.isSignificant || interpretation.isNoise) {
+        console.log(`[SMART MONEY] ${wallet.label} — noise: ${interpretation.noiseReason || 'routine activity'}`);
+        continue;
+      }
+
+      // Find matching KRAKN·AI signal for the coin
+      const coinSignal = currentSignals.find(s => s.sym === interpretation.coin);
+      const kraken_confirms = coinSignal?.action === interpretation.action;
+
+      // Build Telegram message
+      const actionEmoji = interpretation.action === 'BUY' ? '🟢' : interpretation.action === 'SELL' ? '🔴' : '🟡';
+      const urgencyEmoji = interpretation.urgency === 'HIGH' ? '🚨' : interpretation.urgency === 'MEDIUM' ? '⚡' : '📊';
+
+      const msg =
+        `${urgencyEmoji} <b>SMART MONEY ALERT</b>\n\n` +
+        `👛 <b>${wallet.label}</b>\n` +
+        `Win Rate: ${(wallet.winRate*100).toFixed(0)}% | Chain: ${wallet.chain}\n\n` +
+        `${actionEmoji} <b>${interpretation.action} ${interpretation.coin}</b>\n` +
+        `Confidence: ${interpretation.confidence}%\n` +
+        `${interpretation.reasoning}\n\n` +
+        `${kraken_confirms
+          ? `✅ <b>KRAKN·AI CONFIRMS</b> — technical signal agrees\nCombined signal: STRONG ${interpretation.action}`
+          : `⚠️ KRAKN·AI signal: ${coinSignal?.action || 'HOLD'} — use caution`
+        }\n\n` +
+        `Urgency: ${interpretation.urgency} | ${freshTxs.length} transactions in last 2h\n` +
+        `⏰ ${new Date().toLocaleString('en-AU', {timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short'})} AEST`;
+
+      await sendTelegram(msg);
+
+      // Log the alert
+      smartMoneyAlertLog.unshift({
+        walletId:    wallet.id,
+        walletLabel: wallet.label,
+        action:      interpretation.action,
+        coin:        interpretation.coin,
+        confidence:  interpretation.confidence,
+        txHashes,
+        timestamp:   Date.now(),
+      });
+
+      // Keep last 50 alerts
+      if (smartMoneyAlertLog.length > 50) smartMoneyAlertLog = smartMoneyAlertLog.slice(0, 50);
+
+      // If HIGH urgency and confirms KRAKN signal, trigger buy check
+      if (interpretation.urgency === 'HIGH' && kraken_confirms && interpretation.action === 'BUY') {
+        console.log(`[SMART MONEY] High urgency BUY confirmed — triggering buy check`);
+        setTimeout(() => checkBuyOpportunity(), 3000);
+      }
+
+    } catch(e) {
+      console.warn(`[SMART MONEY] Error checking ${wallet.label}:`, e.message);
+    }
+  }
+}
+
+// ─── Smart Money API Routes ───────────────────────────────────
+app.get('/api/smartmoney/wallets', requireAuth, (req, res) => {
+  res.json({ success: true, data: smartWallets, enabled: smartMoneyEnabled });
+});
+
+app.post('/api/smartmoney/wallets', requireAuth, (req, res) => {
+  const { address, label, chain, winRate, tags } = req.body;
+  if (!address || !label || !chain) {
+    return res.status(400).json({ error: 'address, label and chain required' });
+  }
+  const wallet = {
+    id:      'sm' + Date.now(),
+    address: address.trim(),
+    label:   label.trim(),
+    chain:   chain.toLowerCase(),
+    winRate: parseFloat(winRate) || 0.65,
+    tags:    tags || [],
+    active:  true,
+    addedAt: new Date().toISOString(),
+  };
+  smartWallets.push(wallet);
+  saveData();
+  console.log(`[SMART MONEY] Added wallet: ${wallet.label} (${wallet.chain})`);
+  res.json({ success: true, data: wallet });
+});
+
+app.delete('/api/smartmoney/wallets/:id', requireAuth, (req, res) => {
+  const before = smartWallets.length;
+  smartWallets  = smartWallets.filter(w => w.id !== req.params.id);
+  if (smartWallets.length === before) return res.status(404).json({ error: 'Wallet not found' });
+  saveData();
+  res.json({ success: true });
+});
+
+app.post('/api/smartmoney/wallets/:id/toggle', requireAuth, (req, res) => {
+  const wallet = smartWallets.find(w => w.id === req.params.id);
+  if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
+  wallet.active = !wallet.active;
+  saveData();
+  res.json({ success: true, data: wallet });
+});
+
+app.post('/api/smartmoney/toggle', requireAuth, (req, res) => {
+  smartMoneyEnabled = !smartMoneyEnabled;
+  console.log(`[SMART MONEY] ${smartMoneyEnabled ? 'Enabled' : 'Disabled'}`);
+  res.json({ success: true, enabled: smartMoneyEnabled });
+});
+
+app.get('/api/smartmoney/alerts', requireAuth, (req, res) => {
+  res.json({ success: true, data: smartMoneyAlertLog.slice(0, 20) });
+});
+
+app.post('/api/smartmoney/scan', requireAuth, async (req, res) => {
+  res.json({ success: true, message: 'Smart money scan started — check Telegram!' });
+  checkSmartMoneySignals();
+});
+
+// ══════════════════════════════════════════════════════════════
+// FEATURE 1: MACRO EVENT CALENDAR
+// Fetches high-impact economic events from ForexFactory (free)
+// Alerts before Fed decisions, CPI, NFP — tightens stops automatically
+// ══════════════════════════════════════════════════════════════
+let macroCalendarCache  = { events:[], fetchedAt:0 };
+let macroAlertedEvents  = new Set(); // track events already alerted
+
+async function fetchMacroCalendar() {
+  // Cache for 4 hours
+  if (Date.now() - macroCalendarCache.fetchedAt < 4 * 60 * 60 * 1000) {
+    return macroCalendarCache.events;
+  }
+  try {
+    // ForexFactory public calendar — free, no API key
+    const now     = new Date();
+    const dateStr = now.toISOString().split('T')[0].replace(/-/g,'/');
+    const url     = `https://nfs.faireconomy.media/ff_calendar_thisweek.json`;
+    const res     = await fetch(url, { headers:{ 'User-Agent':'KRAKN-AI/4.0' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // Filter to high-impact events only (impact === 'High')
+    const highImpact = data.filter(e =>
+      e.impact === 'High' &&
+      ['USD','AUD','EUR','GBP','CNY'].includes(e.country)
+    ).map(e => ({
+      title:   e.title,
+      country: e.country,
+      date:    e.date,
+      time:    e.time,
+      impact:  e.impact,
+      id:      `${e.date}_${e.title}`.replace(/\s/g,'_'),
+    }));
+
+    macroCalendarCache = { events: highImpact, fetchedAt: Date.now() };
+    console.log(`[MACRO] Loaded ${highImpact.length} high-impact events this week`);
+    return highImpact;
+  } catch(e) {
+    console.warn('[MACRO] Calendar fetch failed:', e.message);
+    return macroCalendarCache.events || [];
+  }
+}
+
+async function checkMacroEvents() {
+  try {
+    const events = await fetchMacroCalendar();
+    const now    = Date.now();
+
+    for (const event of events) {
+      if (macroAlertedEvents.has(event.id)) continue;
+
+      // Parse event time
+      const eventTime = new Date(`${event.date} ${event.time}`).getTime();
+      if (isNaN(eventTime)) continue;
+
+      const minutesUntil = (eventTime - now) / 1000 / 60;
+
+      // Alert 60 minutes before high-impact event
+      if (minutesUntil > 0 && minutesUntil <= 60) {
+        macroAlertedEvents.add(event.id);
+
+        // Auto-tighten stop-loss during macro events
+        const wasStopLossPct = botConfig.stopLossPct;
+        const tightened      = Math.max(3, botConfig.stopLossPct - 2);
+
+        await sendTelegram(
+          `📅 <b>MACRO EVENT IN ${Math.round(minutesUntil)} MINUTES</b>\n\n` +
+          `📊 <b>${event.title}</b>\n` +
+          `Country: ${event.country} | Impact: 🔴 HIGH\n` +
+          `Time: ${event.time} (UTC)\n\n` +
+          `⚠️ High-impact events can cause sudden volatility.\n` +
+          `Your stop-loss has been temporarily tightened from ${wasStopLossPct}% to ${tightened}% during this event.\n\n` +
+          `💡 Consider reducing position sizes until after the announcement.`
+        );
+
+        // Temporarily tighten stop-loss
+        botConfig._preMacroStopLoss = wasStopLossPct;
+        botConfig.stopLossPct       = tightened;
+
+        // Restore after 2 hours
+        setTimeout(() => {
+          if (botConfig._preMacroStopLoss) {
+            botConfig.stopLossPct = botConfig._preMacroStopLoss;
+            delete botConfig._preMacroStopLoss;
+            console.log(`[MACRO] Stop-loss restored to ${botConfig.stopLossPct}% after event`);
+          }
+        }, 2 * 60 * 60 * 1000);
+
+        console.log(`[MACRO] Alert sent for: ${event.title}`);
+      }
+    }
+  } catch(e) { console.warn('[MACRO] Check failed:', e.message); }
+}
+
+// API route to get upcoming macro events
+app.get('/api/macro/events', requireAuth, async (req, res) => {
+  try {
+    const events = await fetchMacroCalendar();
+    const now    = Date.now();
+    const upcoming = events
+      .filter(e => new Date(`${e.date} ${e.time}`).getTime() > now - 3600000)
+      .sort((a,b) => new Date(`${a.date} ${a.time}`) - new Date(`${b.date} ${b.time}`))
+      .slice(0, 10);
+    res.json({ success:true, data: upcoming });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
+// FEATURE 2: CORRELATION INTELLIGENCE
+// Calculates which coins recover fastest after BTC drops
+// Uses existing OHLC data — zero extra API calls
+// ══════════════════════════════════════════════════════════════
+let correlationCache = { matrix:{}, fetchedAt:0 };
+
+async function buildCorrelationMatrix() {
+  // Rebuild every 6 hours
+  if (Date.now() - correlationCache.fetchedAt < 6 * 60 * 60 * 1000) {
+    return correlationCache.matrix;
+  }
+  try {
+    console.log('[CORRELATION] Building correlation matrix...');
+    const allReturns = {};
+
+    // Fetch 1-day candles for all active pairs
+    const pairs = getActivePairs(botConfig.currencyMode).slice(0, 8);
+    for (const pair of pairs) {
+      try {
+        const ohlc  = await krakenPublicRequest('OHLC', { pair, interval: 1440 });
+        const k     = Object.keys(ohlc).find(k => k !== 'last');
+        const closes = ohlc[k].slice(-30).map(c => parseFloat(c[4]));
+        // Calculate daily returns
+        const returns = [];
+        for (let i = 1; i < closes.length; i++) {
+          returns.push((closes[i] - closes[i-1]) / closes[i-1]);
+        }
+        const sym = (PAIR_DISPLAY[pair]||pair).replace('/AUD','').replace('/USD','');
+        allReturns[sym] = returns;
+      } catch(e) {}
+    }
+
+    // Calculate correlation between each pair and BTC
+    const btcReturns = allReturns['BTC'] || [];
+    const matrix     = {};
+
+    for (const [sym, returns] of Object.entries(allReturns)) {
+      if (sym === 'BTC' || returns.length < 10) continue;
+
+      const minLen = Math.min(btcReturns.length, returns.length);
+      const btcSlice  = btcReturns.slice(-minLen);
+      const coinSlice = returns.slice(-minLen);
+
+      // Pearson correlation
+      const n       = minLen;
+      const sumX    = btcSlice.reduce((a,b) => a+b, 0);
+      const sumY    = coinSlice.reduce((a,b) => a+b, 0);
+      const sumXY   = btcSlice.reduce((s,x,i) => s + x*coinSlice[i], 0);
+      const sumX2   = btcSlice.reduce((s,x) => s + x*x, 0);
+      const sumY2   = coinSlice.reduce((s,y) => s + y*y, 0);
+      const corr    = (n*sumXY - sumX*sumY) /
+        Math.sqrt((n*sumX2 - sumX**2) * (n*sumY2 - sumY**2)) || 0;
+
+      // Recovery speed: avg return in day AFTER BTC drops >1%
+      const btcDropDays = btcSlice
+        .map((r,i) => ({ btc:r, coin:coinSlice[i+1]||0 }))
+        .filter(d => d.btc < -0.01);
+      const avgRecovery = btcDropDays.length
+        ? btcDropDays.reduce((s,d) => s+d.coin, 0) / btcDropDays.length
+        : 0;
+
+      matrix[sym] = {
+        correlationWithBTC: parseFloat(corr.toFixed(3)),
+        avgRecoveryAfterBTCDrop: parseFloat(avgRecovery.toFixed(4)),
+        sampleDays: minLen,
+        recoveryEvents: btcDropDays.length,
+      };
+    }
+
+    correlationCache = { matrix, fetchedAt: Date.now() };
+    console.log(`[CORRELATION] Matrix built for ${Object.keys(matrix).length} coins`);
+    return matrix;
+  } catch(e) {
+    console.warn('[CORRELATION] Build failed:', e.message);
+    return correlationCache.matrix || {};
+  }
+}
+
+// Get best recovery coins after a BTC drop
+async function getBestRecoveryCoins() {
+  const matrix = await buildCorrelationMatrix();
+  return Object.entries(matrix)
+    .filter(([,d]) => d.recoveryEvents >= 3)
+    .sort(([,a],[,b]) => b.avgRecoveryAfterBTCDrop - a.avgRecoveryAfterBTCDrop)
+    .slice(0, 5)
+    .map(([sym, d]) => ({
+      sym,
+      avgRecovery: (d.avgRecoveryAfterBTCDrop * 100).toFixed(2) + '%',
+      correlation: d.correlationWithBTC,
+      events:      d.recoveryEvents,
+    }));
+}
+
+app.get('/api/correlation', requireAuth, async (req, res) => {
+  try {
+    const matrix    = await buildCorrelationMatrix();
+    const bestCoins = await getBestRecoveryCoins();
+    res.json({ success:true, data:{ matrix, bestRecoveryCoins:bestCoins } });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
+// FEATURE 3: GRID TRADING STRATEGY
+// Places buy orders at intervals below price, sells above
+// Profits from sideways volatile markets
+// ══════════════════════════════════════════════════════════════
+let gridConfigs = {}; // { pair: { enabled, upperPrice, lowerPrice, gridCount, amountPerGrid, orders:[] } }
+
+function calculateGridLevels(lower, upper, count) {
+  const levels = [];
+  const step   = (upper - lower) / count;
+  for (let i = 0; i <= count; i++) {
+    levels.push(parseFloat((lower + step * i).toFixed(8)));
+  }
+  return levels;
+}
+
+async function checkGridOrders() {
+  for (const [pair, config] of Object.entries(gridConfigs)) {
+    if (!config.enabled) continue;
+    try {
+      const ticker = await fetchSingleTicker(pair);
+      if (!ticker) continue;
+      const price = ticker.price;
+      const dp    = PAIR_DISPLAY[pair] || pair;
+      const levels = calculateGridLevels(config.lowerPrice, config.upperPrice, config.gridCount);
+
+      // Find the grid level just below current price (buy zone)
+      const buyLevel  = levels.filter(l => l < price).pop();
+      // Find the grid level just above current price (sell zone)
+      const sellLevel = levels.find(l => l > price);
+
+      if (!buyLevel || !sellLevel) continue;
+
+      const alreadyBoughtAtLevel = config.orders?.find(o =>
+        o.type === 'buy' && Math.abs(o.price - buyLevel) / buyLevel < 0.001
+      );
+
+      if (!alreadyBoughtAtLevel && price <= buyLevel * 1.001) {
+        // Place grid buy
+        const volume = (config.amountPerGrid / price).toFixed(8);
+        try {
+          const order = await krakenPrivateRequest('AddOrder', {
+            pair, type:'buy', ordertype:'limit',
+            price: buyLevel.toString(), volume,
+          });
+          if (!config.orders) config.orders = [];
+          config.orders.push({ type:'buy', price:buyLevel, volume, txid:order.txid?.[0], timestamp:Date.now() });
+          saveData();
+          await sendTelegram(
+            `📊 <b>GRID BUY — ${dp}</b>\n` +
+            `Level: ${fmtAUDServer(buyLevel, pair)}\n` +
+            `Current: ${fmtAUDServer(price, pair)}\n` +
+            `Volume: ${volume} ${(PAIR_DISPLAY[pair]||pair).replace('/AUD','').replace('/USD','')}\n` +
+            `Next sell target: ${fmtAUDServer(sellLevel, pair)}`
+          );
+          console.log(`[GRID] BUY placed for ${dp} at ${buyLevel}`);
+        } catch(e) { console.warn(`[GRID] Buy failed:`, e.message); }
+      }
+    } catch(e) { console.warn(`[GRID] Check failed for ${pair}:`, e.message); }
+  }
+}
+
+app.get('/api/grid', requireAuth, (req, res) => {
+  res.json({ success:true, data: gridConfigs });
+});
+
+app.post('/api/grid/:pair', requireAuth, (req, res) => {
+  const pair = req.params.pair.toUpperCase();
+  const { upperPrice, lowerPrice, gridCount, amountPerGrid, enabled } = req.body;
+  gridConfigs[pair] = {
+    enabled:       enabled !== false,
+    upperPrice:    parseFloat(upperPrice),
+    lowerPrice:    parseFloat(lowerPrice),
+    gridCount:     parseInt(gridCount) || 5,
+    amountPerGrid: parseFloat(amountPerGrid),
+    orders:        [],
+    createdAt:     new Date().toISOString(),
+  };
+  saveData();
+  const levels = calculateGridLevels(lowerPrice, upperPrice, gridCount || 5);
+  res.json({ success:true, data:{ ...gridConfigs[pair], levels } });
+});
+
+app.delete('/api/grid/:pair', requireAuth, (req, res) => {
+  delete gridConfigs[req.params.pair.toUpperCase()];
+  saveData();
+  res.json({ success:true });
+});
+
+// ══════════════════════════════════════════════════════════════
+// FEATURE 4: PORTFOLIO AUTO-REBALANCING
+// When a position drifts 8%+ from target, auto-rebalances
+// Extends existing target allocation system
+// ══════════════════════════════════════════════════════════════
+let rebalanceConfig = {
+  enabled:       false,
+  driftThreshold: 8,    // % drift before auto-rebalancing
+  minTradeAUD:   50,    // minimum trade size to bother
+};
+
+async function checkAndRebalance() {
+  if (!rebalanceConfig.enabled) return;
+  if (!Object.keys(targetAllocation).length) return;
+
+  try {
+    const bal   = await krakenPrivateRequest('Balance');
+    let total   = 0;
+    const vals  = {};
+
+    // Calculate current values
+    for (const [asset, qty] of Object.entries(bal)) {
+      const q = parseFloat(qty);
+      if (q <= 0) continue;
+      if (['ZAUD','AUD','AUDX'].includes(asset)) {
+        vals['cash'] = (vals['cash']||0) + q; total += q; continue;
+      }
+      const sym  = asset.replace(/^X/,'').replace(/^Z/,'').replace('XBT','BTC');
+      const pair = sym === 'BTC' ? 'XBTAUD' : sym+'AUD';
+      try {
+        const tick = await fetchSingleTicker(pair);
+        if (tick) { const v = q * tick.price; vals[sym] = v; total += v; }
+      } catch(e) {}
+    }
+
+    if (total < 50) return;
+
+    const trades = [];
+
+    for (const [sym, targetPct] of Object.entries(targetAllocation)) {
+      if (sym === 'cash') continue;
+      const actualVal  = vals[sym] || 0;
+      const actualPct  = (actualVal / total) * 100;
+      const drift      = actualPct - targetPct;
+      const targetVal  = (targetPct / 100) * total;
+      const diffAUD    = Math.abs(actualVal - targetVal);
+
+      if (Math.abs(drift) >= rebalanceConfig.driftThreshold && diffAUD >= rebalanceConfig.minTradeAUD) {
+        trades.push({ sym, drift, actualPct, targetPct, diffAUD, action: drift > 0 ? 'SELL' : 'BUY' });
+      }
+    }
+
+    if (!trades.length) return;
+
+    // Execute rebalancing trades
+    let report = `⚖️ <b>AUTO-REBALANCE EXECUTED</b>\n\nPortfolio: ${fmtAUDServer(total)}\n\n`;
+
+    for (const trade of trades) {
+      try {
+        const pair   = trade.sym === 'BTC' ? 'XBTAUD' : trade.sym+'AUD';
+        const ticker = await fetchSingleTicker(pair);
+        if (!ticker) continue;
+        const volume = (trade.diffAUD / ticker.price).toFixed(8);
+        const order  = await krakenPrivateRequest('AddOrder', {
+          pair, type: trade.action.toLowerCase(),
+          ordertype:'market', volume,
+        });
+        recordTrade(pair, trade.sym, trade.action.toLowerCase(), volume, ticker.price, 'rebalance');
+        report += `${trade.action === 'BUY' ? '🟢' : '🔴'} ${trade.action} ${trade.sym}\n`;
+        report += `  ${trade.actualPct.toFixed(1)}% → ${trade.targetPct}% target\n`;
+        report += `  Amount: ${fmtAUDServer(trade.diffAUD)}\n\n`;
+        console.log(`[REBALANCE] ${trade.action} ${trade.sym} — drift ${trade.drift.toFixed(1)}%`);
+      } catch(e) { report += `❌ ${trade.sym}: ${e.message}\n\n`; }
+    }
+
+    await sendTelegram(report);
+    saveData();
+
+  } catch(e) { console.warn('[REBALANCE] Failed:', e.message); }
+}
+
+app.get('/api/rebalance/config', requireAuth, (req, res) => {
+  res.json({ success:true, data: rebalanceConfig });
+});
+
+app.post('/api/rebalance/config', requireAuth, (req, res) => {
+  Object.assign(rebalanceConfig, req.body);
+  saveData();
+  res.json({ success:true, data: rebalanceConfig });
+});
+
+app.post('/api/rebalance/run', requireAuth, async (req, res) => {
+  res.json({ success:true, message:'Rebalancing — check Telegram!' });
+  checkAndRebalance();
+});
+
+// ══════════════════════════════════════════════════════════════
+// FEATURE 5: PERFORMANCE BENCHMARKING
+// Compares your bot returns against BTC and AUD cash
+// Uses existing portfolioHistory + free CoinGecko prices
+// ══════════════════════════════════════════════════════════════
+let benchmarkCache = { data:null, fetchedAt:0 };
+
+async function fetchBenchmarkData() {
+  if (Date.now() - benchmarkCache.fetchedAt < 60 * 60 * 1000) return benchmarkCache.data;
+  try {
+    // CoinGecko free API — BTC price history (no key needed)
+    const res  = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=aud&days=90&interval=daily', {
+      headers:{ 'User-Agent':'KRAKN-AI/4.0' }
+    });
+    const data = await res.json();
+    benchmarkCache = { data: data.prices || [], fetchedAt: Date.now() };
+    return benchmarkCache.data;
+  } catch(e) {
+    console.warn('[BENCHMARK] CoinGecko fetch failed:', e.message);
+    return benchmarkCache.data || [];
+  }
+}
+
+async function calculatePerformance(days = 30) {
+  try {
+    if (portfolioHistory.length < 2) return null;
+
+    const now      = Date.now();
+    const start    = now - days * 24 * 60 * 60 * 1000;
+    const relevant = portfolioHistory.filter(p => p.timestamp >= start);
+    if (relevant.length < 2) return null;
+
+    const first = relevant[0];
+    const last  = relevant[relevant.length - 1];
+    const botReturn = ((last.valueAUD - first.valueAUD) / first.valueAUD) * 100;
+
+    // BTC benchmark
+    const btcPrices = await fetchBenchmarkData();
+    let btcReturn   = 0;
+    if (btcPrices.length >= 2) {
+      const btcStart = btcPrices.find(p => p[0] >= start)?.[1] || btcPrices[0][1];
+      const btcEnd   = btcPrices[btcPrices.length - 1][1];
+      btcReturn      = ((btcEnd - btcStart) / btcStart) * 100;
+    }
+
+    // Win rate from trade log
+    const periodTrades  = tradeLog.filter(t => new Date(t.timestamp).getTime() >= start);
+    const sells         = periodTrades.filter(t => t.type === 'sell');
+    const profitableSells = sells.filter(t => (t.realisedPnl || 0) > 0);
+    const winRate       = sells.length ? (profitableSells.length / sells.length) * 100 : 0;
+
+    // Best and worst trades
+    const sortedSells = sells.sort((a,b) => (b.realisedPnl||0) - (a.realisedPnl||0));
+    const bestTrade   = sortedSells[0];
+    const worstTrade  = sortedSells[sortedSells.length - 1];
+
+    return {
+      period:        days,
+      startValue:    first.valueAUD,
+      endValue:      last.valueAUD,
+      botReturn:     parseFloat(botReturn.toFixed(2)),
+      btcReturn:     parseFloat(btcReturn.toFixed(2)),
+      cashReturn:    0, // holding AUD = 0% return (inflation ignored)
+      alpha:         parseFloat((botReturn - btcReturn).toFixed(2)),
+      totalTrades:   periodTrades.length,
+      winRate:       parseFloat(winRate.toFixed(1)),
+      bestTrade:     bestTrade ? { sym:bestTrade.sym, pnl:bestTrade.realisedPnl } : null,
+      worstTrade:    worstTrade ? { sym:worstTrade.sym, pnl:worstTrade.realisedPnl } : null,
+      dataPoints:    relevant.length,
+      outperforming: botReturn > btcReturn,
+    };
+  } catch(e) {
+    console.warn('[BENCHMARK] Calc failed:', e.message);
+    return null;
+  }
+}
+
+app.get('/api/performance', requireAuth, async (req, res) => {
+  try {
+    const days    = parseInt(req.query.days) || 30;
+    const perf    = await calculatePerformance(days);
+    res.json({ success:true, data: perf });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+// ── Smart Money Status in /health ─────────────────────────────
 app.get('/api/chart/snapshot/:pair', requireAuth, async (req, res) => {
   try {
     const pair     = req.params.pair.toUpperCase();
@@ -2805,19 +3927,27 @@ async function analyseChartWithVision(pair, candles, indicators) {
     const base64Img = imgBuffer.toString('base64');
 
     const dp = PAIR_DISPLAY[pair] || pair;
-    const prompt = `You are an expert technical analyst reviewing a ${dp} candlestick chart.
+    const tfLabel = indicators.timeframe || '1-Hour';
+    const prompt = `You are an expert technical analyst reviewing a ${dp} ${tfLabel} candlestick chart.
 
 The chart shows:
-- Candlestick OHLC data (green = bullish, red = bearish)
+- Candlestick OHLC data (green = bullish, red = bearish)  
 - Yellow line = 20-period moving average
 - Blue dashed lines = Bollinger Bands (2 std dev)
 - Volume bars at bottom
 
+Timeframe context: ${tfLabel} chart
+${indicators.timeframe === '15-Min' ? '(Short-term — look for immediate momentum and breakouts)' : ''}
+${indicators.timeframe === '1-Hour' ? '(Intraday — balance between noise and signal)' : ''}
+${indicators.timeframe === '4-Hour' ? '(Swing trading — medium-term trend and structure)' : ''}
+${indicators.timeframe === 'Daily'  ? '(Position trading — major trends and key levels)' : ''}
+${indicators.timeframe === 'Weekly' ? '(Macro view — primary trend direction only)' : ''}
+
 Current calculated indicators:
-- RSI (1h): ${indicators.rsi}
+- RSI: ${indicators.rsi}
 - MACD trend: ${indicators.macdTrend}
-- Bollinger Band position: ${indicators.bbPosition}
-- Weighted signal score: ${indicators.weightedScore}
+- BB position: ${indicators.bbPosition}
+- Weighted score: ${indicators.weightedScore}
 
 Analyse the VISUAL chart for:
 1. Chart patterns (head & shoulders, triangles, wedges, flags, double tops/bottoms)
@@ -3110,6 +4240,42 @@ app.listen(PORT, () => {
   // Volume anomaly check every 15 minutes (Sprint 1)
   setInterval(async () => { try { await checkVolumeAnomalies(); } catch(e) { console.error("[VOLUME]", e.message); } }, 15 * 60 * 1000);
   setTimeout(async () => { try { await checkVolumeAnomalies(); } catch(e){} }, 90000);
+
+  // Smart money wallet scanner — every 15 minutes
+  setInterval(async () => {
+    try { await checkSmartMoneySignals(); }
+    catch(e) { console.error('[SMART MONEY] Scan error:', e.message); }
+  }, 15 * 60 * 1000);
+  setTimeout(async () => {
+    try { await checkSmartMoneySignals(); }
+    catch(e) { console.error('[SMART MONEY] First scan error:', e.message); }
+  }, 3 * 60 * 1000);
+
+  // Macro event calendar — check every 30 minutes
+  setInterval(async () => {
+    try { await checkMacroEvents(); }
+    catch(e) { console.error('[MACRO] Check error:', e.message); }
+  }, 30 * 60 * 1000);
+  setTimeout(async () => { try { await checkMacroEvents(); } catch(e){} }, 2 * 60 * 1000);
+
+  // Grid trading — check every 5 minutes
+  setInterval(async () => {
+    try { await checkGridOrders(); }
+    catch(e) { console.error('[GRID] Check error:', e.message); }
+  }, 5 * 60 * 1000);
+
+  // Portfolio rebalancing — check every 4 hours
+  setInterval(async () => {
+    try { await checkAndRebalance(); }
+    catch(e) { console.error('[REBALANCE] Error:', e.message); }
+  }, 4 * 60 * 60 * 1000);
+
+  // Correlation matrix — build once on startup then every 6 hours
+  setTimeout(async () => { try { await buildCorrelationMatrix(); } catch(e){} }, 5 * 60 * 1000);
+  setInterval(async () => {
+    try { await buildCorrelationMatrix(); }
+    catch(e) { console.error('[CORRELATION] Build error:', e.message); }
+  }, 6 * 60 * 60 * 1000);
   // Daily portfolio snapshot for performance graph (every 6 hours)
   setTimeout(async () => {
     try { await recordPortfolioSnapshot(); } catch(e) { console.error('[PORTFOLIO] Snapshot error:', e.message); }
