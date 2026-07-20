@@ -2824,7 +2824,25 @@ app.get('/api/smartmoney/alerts', requireAuth, (req, res) => {
 
 app.post('/api/smartmoney/scan', requireAuth, async (req, res) => {
   res.json({ success: true, message: 'Smart money scan started — check Telegram!' });
-  checkSmartMoneySignals();
+  try {
+    const before = smartMoneyAlertLog.length;
+    await checkSmartMoneySignals();
+    const after  = smartMoneyAlertLog.length;
+    if (after === before) {
+      // No new alerts fired — send a summary message
+      await sendTelegram(
+        `🔍 <b>Smart Money Scan Complete</b>\n\n` +
+        `Checked ${smartWallets.filter(w=>w.active).length} wallets — no significant activity in the last 2 hours.\n\n` +
+        `Wallets monitored:\n` +
+        smartWallets.filter(w=>w.active).slice(0,5)
+          .map(w => `• ${w.label} (${w.chain})`)
+          .join('\n') +
+        `\n\n💡 Alerts fire automatically when a wallet makes a large move on a coin KRAKN·AI is tracking.`
+      );
+    }
+  } catch(e) {
+    await sendTelegram(`❌ Smart money scan error: ${e.message}`);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -4184,42 +4202,70 @@ app.get('/api/onchain/:sym', requireAuth, async (req, res) => {
       return res.json({ success: true, data: cached.data, cached: true });
     }
 
-    const prompt = `Search for current on-chain data and network metrics for ${sym} cryptocurrency.
-Find: 1) Large whale transactions in last 24h 2) Exchange inflows/outflows 3) Active addresses trend 4) Network hash rate or validator count 5) Any unusual on-chain activity.
+    const prompt = `Search for current on-chain data for ${sym} cryptocurrency and return ONLY a JSON object, no other text, no markdown backticks.
 
-Return ONLY this JSON (no markdown):
-{
-  "whaleActivity": "brief description of large transactions",
-  "exchangeFlow": "net inflow or outflow from exchanges",
-  "activeAddresses": "trend up/down/stable with number if available",
-  "networkHealth": "strong/moderate/weak with brief reason",
-  "bullishSignals": ["signal1", "signal2"],
-  "bearishSignals": ["signal1", "signal2"],
-  "overallOnChainScore": 6,
-  "summary": "one sentence overall assessment"
-}`;
+{"whaleActivity":"description","exchangeFlow":"inflow or outflow","activeAddresses":"trend","networkHealth":"strong/moderate/weak","bullishSignals":["signal1"],"bearishSignals":["signal1"],"overallOnChainScore":6,"summary":"one sentence"}`;
+
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 30000);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type':'application/json', 'x-api-key':process.env.ANTHROPIC_API_KEY, 'anthropic-version':'2023-06-01' },
+      signal: controller.signal,
+      headers: {
+        'Content-Type':    'application/json',
+        'x-api-key':       process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 600,
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{ role: 'user', content: prompt }]
+        model:      'claude-sonnet-4-6',
+        max_tokens: 400,
+        tools:      [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages:   [{ role: 'user', content: prompt }]
       })
     });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`Claude API returned ${response.status}`);
+    }
 
     const raw  = await response.json();
-    const text = (raw.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
-    const clean = text.replace(/```json|```/g, '').trim();
-    const data  = JSON.parse(clean);
+    const text = (raw.content || [])
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('').trim();
+
+    // Extract JSON from response — handle extra text around it
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON found in response');
+
+    const data = JSON.parse(jsonMatch[0]);
+
+    // Validate required fields
+    if (!data.summary) throw new Error('Invalid response structure');
 
     onChainCache[sym] = { data, fetchedAt: Date.now() };
     console.log(`[ON-CHAIN] ${sym}: score ${data.overallOnChainScore}/10`);
     res.json({ success: true, data });
+
   } catch(err) {
-    res.status(500).json({ error: err.message });
+    console.warn(`[ON-CHAIN] Failed for ${req.params.sym}:`, err.message);
+    // Return a graceful fallback instead of an error
+    res.json({
+      success: true,
+      data: {
+        whaleActivity:       'Data temporarily unavailable',
+        exchangeFlow:        'Unknown',
+        activeAddresses:     'Unknown',
+        networkHealth:       'Unknown',
+        bullishSignals:      [],
+        bearishSignals:      [],
+        overallOnChainScore: 5,
+        summary:             'On-chain data unavailable right now — try again in a few minutes',
+      },
+      error: err.message
+    });
   }
 });
 
