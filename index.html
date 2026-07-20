@@ -948,14 +948,24 @@ function renderDashboard() {
     <div style="padding:14px 18px 0">
       <div style="font-family:'Space Grotesk',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.14em;color:var(--grey2);text-transform:uppercase;margin-bottom:8px">Markets</div>
     </div>
-    <div class="coin-rail" id="coinRail">
-      ${PAIRS.map(pair => {
-        const pd = prices[pair] || {};
-        const c  = parseFloat(pd.change24h || 0);
-        return `<button class="coin-tab ${pair===selectedPair?'active':''}" onclick="selectCoin('${pair}')">
-          ${sym(pair)}&nbsp;<span style="font-size:10px;opacity:0.6">${c>=0?'+':''}${c.toFixed(1)}%</span>
-        </button>`;
-      }).join('')}
+    <div style="display:flex;align-items:stretch;border-bottom:1px solid var(--border)">
+      <div class="coin-rail" id="coinRail" style="flex:1;border-bottom:none">
+        ${PAIRS.map(pair => {
+          const pd = prices[pair] || {};
+          const c  = parseFloat(pd.change24h || 0);
+          return `<button class="coin-tab ${pair===selectedPair?'active':''}" onclick="selectCoin('${pair}')">
+            ${sym(pair)}&nbsp;<span style="font-size:10px;opacity:0.6">${c>=0?'+':''}${c.toFixed(1)}%</span>
+          </button>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;gap:2px;padding:6px 8px;flex-shrink:0;border-left:1px solid var(--border);align-items:center;background:rgba(0,0,0,0.2)">
+        ${['AUD','USD','BOTH'].map(m=>`
+          <button onclick="setCurrencyMode('${m}')" style="padding:3px 7px;border-radius:6px;font-family:'Space Grotesk',sans-serif;
+            font-size:9px;font-weight:700;letter-spacing:0.05em;cursor:pointer;line-height:1.4;
+            border:1px solid ${currencyMode===m?'var(--cyan)':'rgba(0,212,255,0.1)'};
+            background:${currencyMode===m?'rgba(0,212,255,0.15)':'transparent'};
+            color:${currencyMode===m?'var(--cyan)':'var(--grey2)'}">${m}</button>`).join('')}
+      </div>
     </div>
 
     <!-- Selected Coin Price + Chart -->
@@ -1226,11 +1236,18 @@ async function checkAllocation() {
 async function loadOnChain(sym) {
   const el = document.getElementById('onchainPanel');
   if (!el) return;
-  el.innerHTML = `<div class="loading"><div class="spin"></div>Fetching on-chain data for ${sym}...</div>`;
+  el.innerHTML = `<div class="loading"><div class="spin"></div>Fetching on-chain data for ${sym}... (may take 20-30 seconds)</div>`;
   try {
     const res = await api('/api/onchain/' + sym);
     const d   = res.data;
-    const scoreCol = d.overallOnChainScore >= 7 ? 'var(--green)' : d.overallOnChainScore >= 4 ? 'var(--yellow)' : 'var(--red)';
+    if (!d || d.summary?.includes('unavailable')) {
+      el.innerHTML = `<div style="color:var(--yellow);font-size:12px;font-family:'Space Grotesk',sans-serif;line-height:1.6">
+        ⏳ Claude is searching for ${sym} on-chain data. This can take up to 30 seconds.<br>
+        <span style="color:var(--grey2)">Tap FETCH again in a moment.</span>
+      </div>`;
+      return;
+    }
+    const scoreCol = (d.overallOnChainScore||5) >= 7 ? 'var(--green)' : (d.overallOnChainScore||5) >= 4 ? 'var(--yellow)' : 'var(--red)';
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <div style="font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:700">${sym} On-Chain Health</div>
@@ -2461,12 +2478,21 @@ async function loadBotStatus() {
     const state  = statusRes.data || {};
     const config = configRes.data || {};
     // Sync local state with server-persisted config
-    if (config.riskLevel)          botCfg.riskLevel          = config.riskLevel;
-    if (config.confidenceMin)      botCfg.confidenceMin      = config.confidenceMin;
-    if (config.minHoldingValueAUD) botCfg.minHoldingValueAUD = config.minHoldingValueAUD;
-    if (config.stopLossPct)        botCfg.stopLossPct        = config.stopLossPct;
+    if (config.riskLevel)            botCfg.riskLevel            = config.riskLevel;
+    if (config.confidenceMin)        botCfg.confidenceMin        = config.confidenceMin;
+    if (config.minHoldingValueAUD)   botCfg.minHoldingValueAUD   = config.minHoldingValueAUD;
+    if (config.stopLossPct)          botCfg.stopLossPct          = config.stopLossPct;
+    if (config.minHoldMinutes)       botCfg.minHoldMinutes       = config.minHoldMinutes;
+    if (config.autoBuyMinConfidence) botCfg.autoBuyMinConfidence = config.autoBuyMinConfidence;
+    if (config.autoBuyMaxAUD)        botCfg.autoBuyMaxAUD        = config.autoBuyMaxAUD;
+    if (config.autoBuy !== undefined)        botCfg.autoBuy        = config.autoBuy;
     if (config.stopLossEnabled !== undefined) botCfg.stopLossEnabled = config.stopLossEnabled;
     if (config.trailingStop !== undefined)    botCfg.trailingStop    = config.trailingStop;
+    if (config.currencyMode) {
+      currencyMode = config.currencyMode;
+      localStorage.setItem('currencyMode', currencyMode);
+      PAIRS = getActivePairs();
+    }
     botActive      = state.running || false;
     if(badge){ badge.textContent=botActive?'RUNNING':'STOPPED'; badge.className=`running-badge ${botActive?'on':'off'}`; }
     botLastSignals=state.lastSignals||{};
