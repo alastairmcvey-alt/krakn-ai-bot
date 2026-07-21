@@ -1881,47 +1881,166 @@ async function downloadTaxCSV() {
   } catch(e) { showToast('Error: ' + e.message); }
 }
 
-// ── Performance Benchmarking ──────────────────────────────────
+// ── Full Performance Report ───────────────────────────────────
 async function loadPerformanceBenchmark() {
   const el = document.getElementById('perfBenchmark');
   if (!el || !serverOnline || !cfg.botToken) return;
+  el.innerHTML = '<div class="loading"><div class="spin"></div>Loading report...</div>';
   try {
-    const res  = await api('/api/performance?days=30');
-    const d    = res.data;
-    if (!d) { el.innerHTML = '<div class="card-body" style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif">Not enough data yet — needs at least 2 portfolio snapshots. Check back after 24 hours.</div>'; return; }
-    const alphaCol  = d.alpha >= 0 ? 'var(--green)' : 'var(--red)';
-    const botCol    = d.botReturn >= 0 ? 'var(--green)' : 'var(--red)';
-    const btcCol    = d.btcReturn >= 0 ? 'var(--green)' : 'var(--red)';
-    el.innerHTML = `<div class="card-body">
-      <div style="display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;gap:0;margin-bottom:14px;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.1);border-radius:12px;overflow:hidden">
-        <div style="padding:12px;text-align:center">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:${botCol}">${d.botReturn>=0?'+':''}${d.botReturn}%</div>
-          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">KRAKN·AI</div>
-        </div>
-        <div style="background:rgba(0,212,255,0.08)"></div>
-        <div style="padding:12px;text-align:center">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:${btcCol}">${d.btcReturn>=0?'+':''}${d.btcReturn}%</div>
-          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">BTC HOLD</div>
-        </div>
-        <div style="background:rgba(0,212,255,0.08)"></div>
-        <div style="padding:12px;text-align:center">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:var(--grey2)">0%</div>
-          <div style="font-size:9px;color:var(--grey2);margin-top:3px;letter-spacing:0.1em;text-transform:uppercase">AUD CASH</div>
-        </div>
+    const res = await api('/api/performance?days=30');
+    const d   = res.data;
+    if (!d) { el.innerHTML = '<div class="card-body" style="color:var(--grey2);font-size:12px;font-family:\'Space Grotesk\',sans-serif">Not enough data yet — the bot needs to complete at least a few trades first. Check back after 24 hours of running.</div>'; return; }
+
+    const t  = d.trades   || {};
+    const l  = d.learning || {};
+    const pr = d.portfolio;
+    const prog = l.progression;
+
+    // Header row — key numbers
+    const retCol  = pr?.returnPct >= 0 ? 'var(--green)' : 'var(--red)';
+    const alphaCol = d.alpha >= 0 ? 'var(--green)' : 'var(--red)';
+    const wrCol    = t.winRate >= 55 ? 'var(--green)' : t.winRate >= 45 ? 'var(--yellow)' : 'var(--red)';
+
+    el.innerHTML = `
+    <!-- Key metrics strip -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--border)">
+      ${[
+        { val: pr ? `${pr.returnPct >= 0?'+':''}${pr.returnPct}%` : '--', label:'Portfolio 30d', col: pr ? retCol : 'var(--grey2)' },
+        { val: d.btcReturn !== null ? `${d.btcReturn >= 0?'+':''}${d.btcReturn}%` : '--', label:'BTC 30d', col:'var(--grey2)' },
+        { val: d.alpha !== null ? `${d.alpha >= 0?'+':''}${d.alpha}%` : '--', label:'Alpha vs BTC', col: d.alpha !== null ? alphaCol : 'var(--grey2)' },
+        { val: t.winRate ? `${t.winRate}%` : '--', label:'Win Rate', col: t.winRate ? wrCol : 'var(--grey2)' },
+      ].map(m => `<div style="padding:14px;text-align:center">
+        <div style="font-family:'Space Mono',monospace;font-size:20px;font-weight:700;color:${m.col}">${m.val}</div>
+        <div style="font-size:9px;color:var(--grey2);text-transform:uppercase;letter-spacing:0.1em;margin-top:3px;font-family:'Space Grotesk',sans-serif">${m.label}</div>
+      </div>`).join('')}
+    </div>
+
+    <!-- Trade stats row -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--border)">
+      ${[
+        { val: t.closed || 0,          label:'Trades Closed' },
+        { val: t.profitFactor ? t.profitFactor.toFixed(2) : '--', label:'Profit Factor' },
+        { val: t.avgWinPct ? `+${t.avgWinPct}%` : '--', label:'Avg Win' },
+        { val: t.avgLossPct ? `${t.avgLossPct}%` : '--', label:'Avg Loss' },
+      ].map(m => `<div style="padding:12px;text-align:center">
+        <div style="font-family:'Space Mono',monospace;font-size:16px;font-weight:700;color:var(--white)">${m.val}</div>
+        <div style="font-size:9px;color:var(--grey2);text-transform:uppercase;letter-spacing:0.1em;margin-top:3px;font-family:'Space Grotesk',sans-serif">${m.label}</div>
+      </div>`).join('')}
+    </div>
+
+    <!-- Learning progression -->
+    ${prog ? `
+    <div style="padding:14px;border-bottom:1px solid var(--border)">
+      <div style="font-family:'Space Mono',monospace;font-size:10px;color:var(--cyan);letter-spacing:0.15em;margin-bottom:10px">
+        🧠 LEARNING PROGRESSION ${prog.improving ? '▲ IMPROVING' : '▼ NOT YET IMPROVING'}
       </div>
-      <div style="display:flex;gap:10px;margin-bottom:10px">
-        <div style="flex:1;padding:10px;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.1);border-radius:10px;text-align:center">
-          <div style="font-size:11px;color:${alphaCol};font-weight:700;font-family:'Space Grotesk',sans-serif">${d.alpha>=0?'+':''}${d.alpha}% alpha</div>
-          <div style="font-size:9px;color:var(--grey2);margin-top:2px">${d.outperforming?'Beating BTC':'Lagging BTC'}</div>
-        </div>
-        <div style="flex:1;padding:10px;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.1);border-radius:10px;text-align:center">
-          <div style="font-size:11px;color:${d.winRate>=55?'var(--green)':'var(--yellow)'};font-weight:700;font-family:'Space Grotesk',sans-serif">${d.winRate}% win rate</div>
-          <div style="font-size:9px;color:var(--grey2);margin-top:2px">${d.totalTrades} trades / 30d</div>
-        </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        ${[
+          { label:'Early Trades', data:prog.early,  col:'var(--grey2)' },
+          { label:'Mid Period',   data:prog.mid,    col:'var(--yellow)' },
+          { label:'Recent',       data:prog.recent, col: prog.improving ? 'var(--green)' : 'var(--red)' },
+        ].map(p => `<div style="padding:10px;background:rgba(0,212,255,0.03);border:1px solid var(--border);border-radius:10px;text-align:center">
+          <div style="font-size:9px;color:var(--grey2);margin-bottom:6px;font-family:'Space Grotesk',sans-serif">${p.label}</div>
+          <div style="font-family:'Space Mono',monospace;font-size:18px;font-weight:700;color:${p.col}">${p.data.winRate}%</div>
+          <div style="font-size:9px;color:var(--grey2);margin-top:2px">win rate</div>
+          <div style="font-size:10px;color:${p.data.avgPnl>=0?'var(--green)':'var(--red)'};font-family:'Space Mono',monospace;margin-top:4px">
+            ${p.data.avgPnl>=0?'+':''}${p.data.avgPnl}% avg
+          </div>
+          <div style="font-size:9px;color:var(--grey2)">${p.data.trades} trades</div>
+        </div>`).join('')}
       </div>
-      ${d.bestTrade?`<div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">Best: <span style="color:var(--green)">${d.bestTrade.sym} +${fmtAUD(d.bestTrade.pnl)}</span> · Worst: <span style="color:var(--red)">${d.worstTrade.sym} ${fmtAUD(d.worstTrade.pnl)}</span></div>`:''}
+      ${prog.winRateDelta !== 0 ? `
+      <div style="margin-top:10px;padding:8px 12px;background:rgba(${prog.improving?'0,200,150':'255,68,102'},0.06);border:1px solid rgba(${prog.improving?'0,200,150':'255,68,102'},0.2);border-radius:8px;font-size:11px;color:${prog.improving?'var(--green)':'var(--red)'};font-family:'Space Grotesk',sans-serif">
+        ${prog.improving ? '📈' : '📉'} Win rate has ${prog.improving?'improved':'declined'} by <strong>${Math.abs(prog.winRateDelta)}%</strong> since the bot started trading. 
+        Average P&L per trade: <strong>${prog.pnlDelta>=0?'+':''}${prog.pnlDelta}%</strong> change.
+      </div>` : ''}
+    </div>` : `
+    <div style="padding:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--grey2);font-family:'Space Grotesk',sans-serif;line-height:1.6">
+      🧠 Learning progression requires at least 9 closed trades to calculate. Keep the bot running.
+    </div>`}
+
+    <!-- Signal weights -->
+    ${l.weightChanges?.length ? `
+    <div style="padding:14px;border-bottom:1px solid var(--border)">
+      <div style="font-family:'Space Mono',monospace;font-size:10px;color:var(--cyan);letter-spacing:0.15em;margin-bottom:10px">SIGNAL WEIGHT ADJUSTMENTS</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${l.weightChanges.slice(0,6).map(w => {
+          const pct = Math.round((w.weight - 1.0) * 100);
+          const col = w.direction === 'boosted' ? 'var(--green)' : 'var(--red)';
+          const bar = Math.min(Math.abs(pct), 50);
+          return `<div style="display:flex;align-items:center;gap:8px">
+            <div style="font-size:11px;width:120px;color:var(--grey1);font-family:'Space Grotesk',sans-serif;flex-shrink:0">${w.signal.replace(/_/g,' ')}</div>
+            <div style="flex:1;height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden">
+              <div style="height:100%;width:${50+bar}%;background:${col};border-radius:2px;transition:width 0.5s"></div>
+            </div>
+            <div style="font-family:'Space Mono',monospace;font-size:11px;color:${col};width:50px;text-align:right">${pct>=0?'+':''}${pct}%</div>
+          </div>`;
+        }).join('')}
+      </div>
+      ${l.sessionsRun > 0 ? `<div style="font-size:10px;color:var(--grey2);margin-top:8px;font-family:'Space Grotesk',sans-serif">${l.sessionsRun} learning sessions run · Last: ${l.lastSession ? new Date(l.lastSession.timestamp).toLocaleDateString('en-AU') : 'never'}</div>` : ''}
+    </div>` : `
+    <div style="padding:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">
+      Signal weights are at defaults. Learning adjusts these automatically after 5+ closed trades.
+    </div>`}
+
+    <!-- Last learning insight -->
+    ${l.lastSession?.keyInsight ? `
+    <div style="padding:14px;border-bottom:1px solid var(--border)">
+      <div style="font-family:'Space Mono',monospace;font-size:10px;color:var(--cyan);letter-spacing:0.15em;margin-bottom:8px">LATEST INSIGHT</div>
+      <div style="font-size:12px;color:var(--white);line-height:1.6;margin-bottom:8px">${l.lastSession.keyInsight}</div>
+      <div style="font-size:11px;color:var(--green);margin-bottom:4px">✓ ${l.lastSession.winningPattern}</div>
+      <div style="font-size:11px;color:var(--red)">✗ ${l.lastSession.losingPattern}</div>
+    </div>` : ''}
+
+    <!-- Coin breakdown -->
+    ${Object.keys(t.coinBreakdown||{}).length ? `
+    <div style="padding:14px;border-bottom:1px solid var(--border)">
+      <div style="font-family:'Space Mono',monospace;font-size:10px;color:var(--cyan);letter-spacing:0.15em;margin-bottom:10px">PER-COIN PERFORMANCE</div>
+      ${Object.entries(t.coinBreakdown).map(([sym,c]) => {
+        const total = c.wins + c.losses;
+        const wr    = total ? Math.round(c.wins/total*100) : 0;
+        const avg   = total ? (c.totalPnl/total).toFixed(1) : '0';
+        return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(0,212,255,0.04)">
+          <div style="font-family:'Space Mono',monospace;font-size:12px;font-weight:700;width:48px">${sym}</div>
+          <div style="flex:1;height:3px;background:rgba(255,255,255,0.06);border-radius:2px">
+            <div style="height:100%;width:${wr}%;background:${wr>=55?'var(--green)':wr>=45?'var(--yellow)':'var(--red)'};border-radius:2px"></div>
+          </div>
+          <div style="font-size:11px;color:var(--grey2);font-family:'Space Grotesk',sans-serif">${wr}% (${c.wins}W/${c.losses}L)</div>
+          <div style="font-family:'Space Mono',monospace;font-size:11px;color:${parseFloat(avg)>=0?'var(--green)':'var(--red)'}">${parseFloat(avg)>=0?'+':''}${avg}%</div>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+
+    <!-- Best/worst -->
+    ${t.bestTrade || t.worstTrade ? `
+    <div style="padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${t.bestTrade ? `<div style="padding:10px;background:rgba(0,200,150,0.06);border:1px solid rgba(0,200,150,0.15);border-radius:10px">
+        <div style="font-size:9px;color:var(--green);letter-spacing:0.1em;margin-bottom:4px;font-family:'Space Mono',monospace">BEST TRADE</div>
+        <div style="font-size:14px;font-weight:700;font-family:'Space Mono',monospace;color:var(--green)">+${t.bestTrade.pnlPct}%</div>
+        <div style="font-size:11px;color:var(--grey2)">${t.bestTrade.sym} · ${t.bestTrade.durationMinutes}min</div>
+      </div>` : ''}
+      ${t.worstTrade ? `<div style="padding:10px;background:rgba(255,68,102,0.06);border:1px solid rgba(255,68,102,0.15);border-radius:10px">
+        <div style="font-size:9px;color:var(--red);letter-spacing:0.1em;margin-bottom:4px;font-family:'Space Mono',monospace">WORST TRADE</div>
+        <div style="font-size:14px;font-weight:700;font-family:'Space Mono',monospace;color:var(--red)">${t.worstTrade.pnlPct}%</div>
+        <div style="font-size:11px;color:var(--grey2)">${t.worstTrade.sym} · ${t.worstTrade.durationMinutes}min</div>
+      </div>` : ''}
+    </div>` : ''}
+
+    <!-- Generate report button -->
+    <div style="padding:14px;border-top:1px solid var(--border)">
+      <button onclick="generateReport()" class="btn btn-ghost" style="width:100%;font-size:12px">
+        📄 Generate Full Telegram Report
+      </button>
     </div>`;
+
   } catch(e) { el.innerHTML = `<div class="card-body" style="color:var(--red);font-size:12px">${e.message}</div>`; }
+}
+
+async function generateReport() {
+  if (!serverOnline || !cfg.botToken) { showToast('Server offline'); return; }
+  showToast('📊 Generating report — check Telegram!');
+  try { await api('/api/performance/report', { method:'POST' }); }
+  catch(e) { showToast('Error: ' + e.message); }
 }
 
 // ── Correlation Intelligence ──────────────────────────────────
