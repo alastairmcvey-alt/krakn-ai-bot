@@ -177,48 +177,99 @@ let selectedPairForChat   = 'XBTAUD'; // tracks last coin mentioned in Telegram
 
 // ─── P&L Tracking ──────────────────────────────────────────────
 // Stores every trade we make through the bot for P&L calculation
-let tradeLog = [];          // { id, pair, sym, type, volume, price, valueAUD, timestamp, source }
-let pnlByAsset = {};        // { BTC: { avgBuyPrice, totalBought, totalSold, realised } }
+let tradeLog = []; // { id, pair, sym, type, volume, price, valueAUD, timestamp, source, signalConditions }
+let pnlByAsset = {}; // { BTC: { avgBuyPrice, totalBought, totalSold, realised } }
 
-function recordTrade(pair, sym, type, volume, price, source = 'manual') {
+// Signal learning weights — adjusted over time based on what works
+// Each key is a signal type, value is a multiplier (0.5 = half weight, 2.0 = double weight)
+let signalWeights = {
+  rsi_oversold:      1.0, // RSI < 30 on buy
+  rsi_overbought:    1.0, // RSI > 70 on sell
+  hammer:            1.0, // Hammer candlestick
+  engulfing:         1.0, // Engulfing pattern
+  morning_star:      1.0, // Morning star
+  macd_bullish:      1.0, // MACD bullish cross
+  bb_lower:          1.0, // Price at BB lower band
+  bb_upper:          1.0, // Price at BB upper band
+  volume_spike:      1.0, // Volume anomaly
+  vision_confirms:   1.0, // Vision AI confirms signal
+  vision_disagrees:  1.0, // Vision AI disagrees (negative weight)
+  sentiment_bull:    1.0, // Positive sentiment
+  sentiment_bear:    1.0, // Negative sentiment
+  fear_extreme:      1.0, // Extreme fear (good contrarian buy)
+  multi_tf_agrees:   1.0, // Multiple timeframes agree
+};
+
+// Trade outcome log — used for learning
+// { tradeId, sym, buySignals, sellSignals, buyRsi, sellRsi, 
+//   buyPrice, sellPrice, pnlPct, won, durationMinutes, patterns }
+let tradeOutcomes = [];
+
+function recordTrade(pair, sym, type, volume, price, source = 'manual', signalConditions = null) {
   const valueAUD = parseFloat(volume) * parseFloat(price);
   const trade = {
-    id:        Date.now().toString(),
+    id:                Date.now().toString(),
     pair, sym, type,
-    volume:    parseFloat(volume),
-    price:     parseFloat(price),
+    volume:            parseFloat(volume),
+    price:             parseFloat(price),
     valueAUD,
-    timestamp: new Date().toISOString(),
-    source,    // 'bot-sell', 'bot-buy', 'manual', 'stop-loss'
+    timestamp:         new Date().toISOString(),
+    source,
+    signalConditions,  // Store what signals were active when this trade was made
   };
   tradeLog.push(trade);
-  // Keep last 500 trades
   if (tradeLog.length > 500) tradeLog = tradeLog.slice(-500);
 
   // Update P&L tracking
   if (!pnlByAsset[sym]) pnlByAsset[sym] = { avgBuyPrice:0, totalVolume:0, totalCost:0, realisedPnl:0, tradeCount:0 };
   const asset = pnlByAsset[sym];
   if (type === 'buy') {
-    // Update average buy price
     const newTotalCost   = asset.totalCost + valueAUD;
     const newTotalVolume = asset.totalVolume + parseFloat(volume);
-    asset.avgBuyPrice = newTotalCost / newTotalVolume;
-    asset.totalVolume = newTotalVolume;
-    asset.totalCost   = newTotalCost;
+    asset.avgBuyPrice    = newTotalCost / newTotalVolume;
+    asset.totalVolume    = newTotalVolume;
+    asset.totalCost      = newTotalCost;
+    // Store entry conditions for outcome tracking
+    if (signalConditions) {
+      trade.entryConditions = signalConditions;
+    }
   } else if (type === 'sell') {
-    // Calculate realised P&L
     if (asset.avgBuyPrice > 0) {
-      const costBasis     = asset.avgBuyPrice * parseFloat(volume);
-      const proceeds      = valueAUD;
-      asset.realisedPnl  += proceeds - costBasis;
-      // Reduce position
-      asset.totalVolume   = Math.max(0, asset.totalVolume - parseFloat(volume));
-      asset.totalCost     = asset.avgBuyPrice * asset.totalVolume;
+      const costBasis    = asset.avgBuyPrice * parseFloat(volume);
+      const proceeds     = valueAUD;
+      const pnl          = proceeds - costBasis;
+      const pnlPct       = ((proceeds - costBasis) / costBasis) * 100;
+      asset.realisedPnl += pnl;
+      asset.totalVolume  = Math.max(0, asset.totalVolume - parseFloat(volume));
+      asset.totalCost    = asset.avgBuyPrice * asset.totalVolume;
+
+      // Find matching buy trade to record outcome
+      const matchingBuy = [...tradeLog].reverse().find(t =>
+        t.sym === sym && t.type === 'buy' && t.entryConditions
+      );
+      if (matchingBuy?.entryConditions) {
+        const buyTime  = new Date(matchingBuy.timestamp).getTime();
+        const sellTime = new Date(trade.timestamp).getTime();
+        tradeOutcomes.push({
+          tradeId:         matchingBuy.id,
+          sym,
+          won:             pnl > 0,
+          pnlPct:          parseFloat(pnlPct.toFixed(2)),
+          pnlAUD:          parseFloat(pnl.toFixed(2)),
+          durationMinutes: Math.round((sellTime - buyTime) / 60000),
+          buyPrice:        matchingBuy.price,
+          sellPrice:       parseFloat(price),
+          conditions:      matchingBuy.entryConditions,
+          timestamp:       new Date().toISOString(),
+        });
+        if (tradeOutcomes.length > 200) tradeOutcomes = tradeOutcomes.slice(-200);
+        // Trigger learning after every closed trade
+        setTimeout(learnFromOutcomes, 2000);
+      }
     }
   }
   asset.tradeCount++;
-  console.log(`[P&L] Recorded ${type.toUpperCase()} ${volume} ${sym} @ ${fmtAUDServer(price)} — Realised P&L: ${fmtAUDServer(asset.realisedPnl)}`);
-  // Save to disk so P&L survives restarts
+  console.log(`[P&L] ${type.toUpperCase()} ${volume} ${sym} @ ${fmtAUDServer(price, pair)}`);
   setTimeout(saveData, 100);
   return trade;
 }
@@ -296,6 +347,7 @@ let smartWallets = [
 let smartMoneyAlertLog = [];
 let smartMoneyEnabled  = true;
 let smartMoneyCache    = {}; // { walletId: { txs, fetchedAt } }
+let waitlistSignups    = []; // { name, email, timestamp }
 
 // ─── DCA (Dollar Cost Averaging) Bot ─────────────────────────
 let dcaConfig = {
@@ -320,6 +372,8 @@ function saveData() {
       lastBuyTimes, targetAllocation,
       smartWallets, smartMoneyAlertLog,
       gridConfigs, rebalanceConfig,
+      waitlistSignups,
+      signalWeights, tradeOutcomes,
       botRunning: botState.running,
       savedAt: new Date().toISOString(),
     };
@@ -355,16 +409,20 @@ function loadData() {
       if (data.smartMoneyAlertLog)  smartMoneyAlertLog  = data.smartMoneyAlertLog;
       if (data.gridConfigs)         gridConfigs         = data.gridConfigs;
       if (data.rebalanceConfig)     Object.assign(rebalanceConfig, data.rebalanceConfig);
+      if (data.waitlistSignups)     waitlistSignups     = data.waitlistSignups;
+      if (data.signalWeights)       Object.assign(signalWeights, data.signalWeights);
+      if (data.tradeOutcomes)       tradeOutcomes       = data.tradeOutcomes;
       // Auto-restart bot if it was running before the server restarted
+      // Delay 45s — gives Railway time to complete health check before heavy computation
       if (data.botRunning) {
-        console.log('[LOAD] Bot was running before restart — will auto-start in 5s');
+        console.log('[LOAD] Bot was running — auto-starting in 45s (after health check)');
         setTimeout(() => {
           if (!botState.running) {
             botState.running = true;
             startAutoSellLoop();
             console.log('[LOAD] ✅ Bot auto-restarted');
           }
-        }, 5000);
+        }, 45000);
       }
       console.log(`[LOAD] ✅ Settings restored from ${src} — bot was ${data.botRunning ? 'ON (restarting)' : 'OFF'}`);
       console.log(`[LOAD] risk=${botConfig.riskLevel} confidence=${botConfig.confidenceMin}% stopLoss=${botConfig.stopLossPct}%`);
@@ -1153,16 +1211,72 @@ async function computeSignalForPair(pair) {
       } catch(e) { console.warn('[VISION] Multi-TF failed:', e.message); }
     }
 
+    // ── Apply learned signal weights to confidence ────────────
+    // After enough trades, the learning engine adjusts these weights
+    // based on which signals actually predicted profitable outcomes
+    const activeSignals = [];
+    let weightMultiplier = 1.0;
+
+    // Check which signals fired and apply their learned weights
+    if (tf60.rsi < 30) { activeSignals.push('rsi_oversold');   weightMultiplier *= signalWeights.rsi_oversold; }
+    if (tf60.rsi > 70) { activeSignals.push('rsi_overbought'); weightMultiplier *= signalWeights.rsi_overbought; }
+    if (tf60.macd?.trend === 'bullish') { activeSignals.push('macd_bullish'); weightMultiplier *= signalWeights.macd_bullish; }
+    if (tf60.bb?.position === 'lower')  { activeSignals.push('bb_lower');     weightMultiplier *= signalWeights.bb_lower; }
+    if (tf60.bb?.position === 'upper')  { activeSignals.push('bb_upper');     weightMultiplier *= signalWeights.bb_upper; }
+
+    // Pattern-based weights
+    const patternNames = [...tf60.patterns, ...tf240.patterns].map(p => p?.name?.toLowerCase() || '');
+    if (patternNames.some(n => n.includes('hammer')))    { activeSignals.push('hammer');       weightMultiplier *= signalWeights.hammer; }
+    if (patternNames.some(n => n.includes('engulfing'))) { activeSignals.push('engulfing');    weightMultiplier *= signalWeights.engulfing; }
+    if (patternNames.some(n => n.includes('morning')))   { activeSignals.push('morning_star'); weightMultiplier *= signalWeights.morning_star; }
+
+    // Vision-based weights
+    if (vision) {
+      if (vision.visionAction === action && vision.patternStrength >= 7) {
+        activeSignals.push('vision_confirms');
+        weightMultiplier *= signalWeights.vision_confirms;
+      } else if (vision.visionAction !== action && vision.visionAction !== 'HOLD') {
+        activeSignals.push('vision_disagrees');
+        weightMultiplier *= (2 - signalWeights.vision_confirms); // inverse
+      }
+    }
+
+    // Multiple timeframes agree
+    const tfActions = [
+      tf15.score > 2 ? 'BUY' : tf15.score < -2 ? 'SELL' : 'HOLD',
+      tf60.score > 2 ? 'BUY' : tf60.score < -2 ? 'SELL' : 'HOLD',
+      tf240.score > 2 ? 'BUY' : tf240.score < -2 ? 'SELL' : 'HOLD',
+    ];
+    if (tfActions.every(a => a === action)) {
+      activeSignals.push('multi_tf_agrees');
+      weightMultiplier *= signalWeights.multi_tf_agrees;
+    }
+
+    // Apply weight multiplier to confidence (capped)
+    const weightedConfidence = Math.min(99, Math.round(confidence * Math.min(weightMultiplier, 1.5)));
+
+    // Store signal conditions for learning after trade closes
+    const signalConditions = {
+      rsi:          tf60.rsi,
+      weightedScore,
+      activeSignals,
+      weightMultiplier: parseFloat(weightMultiplier.toFixed(3)),
+      visionAction:     vision?.visionAction || null,
+      patterns:         patternNames.filter(Boolean).slice(0,3),
+    };
+
     return {
       action,
-      confidence:   Math.min(99, Math.round(confidence)),
+      confidence:      weightedConfidence,
+      rawConfidence:   Math.min(99, Math.round(confidence)),
       weightedScore,
-      signals:      allSignals,
+      signals:         allSignals,
       vision,
       visionAll,
+      signalConditions, // stored with trade for learning
       patterns: [
-        ...tf60.patterns.map(p => ({ ...p, tf: '1h' })),
-        ...tf240.patterns.map(p => ({ ...p, tf: '4h' })),
+        ...tf60.patterns.map(p => ({ ...p, tf:'1h' })),
+        ...tf240.patterns.map(p => ({ ...p, tf:'4h' })),
       ],
       timeframes: {
         '15m': { rsi:tf15.rsi, macd:tf15.macd.trend, bb:tf15.bb.position, score:tf15.score, patterns:tf15.patterns.map(p=>p.name) },
@@ -1489,7 +1603,7 @@ async function checkBuyOpportunities(marketData) {
           volume,
         });
 
-        recordTrade(bestOpportunity.pair, bestOpportunity.sym, 'buy', volume, bestOpportunity.price, 'auto-buy');
+        recordTrade(bestOpportunity.pair, bestOpportunity.sym, 'buy', volume, bestOpportunity.price, 'auto-buy', bestOpportunity.signal?.signalConditions || null);
         lastBuyTimes[bestOpportunity.sym] = Date.now();
         saveData();
 
@@ -2770,6 +2884,162 @@ async function checkSmartMoneySignals() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// LEARNING ENGINE
+// Analyses closed trade outcomes and adjusts signal weights
+// ══════════════════════════════════════════════════════════════
+
+let lastLearnAt     = 0;
+let learningLog     = [];
+let learningEnabled = true;
+
+async function learnFromOutcomes() {
+  if (!learningEnabled) return;
+  if (tradeOutcomes.length < 5) return;
+  if (Date.now() - lastLearnAt < 60 * 60 * 1000) return;
+
+  try {
+    console.log(`[LEARNING] Analysing ${tradeOutcomes.length} trade outcomes...`);
+    lastLearnAt = Date.now();
+
+    const conditionStats = {};
+    tradeOutcomes.forEach(outcome => {
+      if (!outcome.conditions) return;
+      const signals = outcome.conditions.activeSignals || [];
+      signals.forEach(signal => {
+        if (!conditionStats[signal]) conditionStats[signal] = { wins:0, losses:0, totalPnl:0 };
+        if (outcome.won) conditionStats[signal].wins++;
+        else conditionStats[signal].losses++;
+        conditionStats[signal].totalPnl += outcome.pnlPct;
+      });
+    });
+
+    const winRate = tradeOutcomes.filter(t => t.won).length / tradeOutcomes.length;
+    const avgPnl  = tradeOutcomes.reduce((s,t) => s + t.pnlPct, 0) / tradeOutcomes.length;
+
+    const conditionSummary = Object.entries(conditionStats)
+      .sort(([,a],[,b]) => (b.wins/(b.wins+b.losses)||0) - (a.wins/(a.wins+a.losses)||0))
+      .map(([name, s]) => {
+        const rate = s.wins + s.losses > 0 ? ((s.wins/(s.wins+s.losses))*100).toFixed(0) : '?';
+        return `${name}: ${rate}% win rate (${s.wins}W/${s.losses}L, avg ${(s.totalPnl/(s.wins+s.losses)).toFixed(1)}% P&L)`;
+      }).join('\n');
+
+    const recentOutcomes = tradeOutcomes.slice(-20).map(o =>
+      `${o.sym} ${o.won?'WIN':'LOSS'} ${o.pnlPct>0?'+':''}${o.pnlPct}% | RSI:${o.conditions?.rsi||'?'} | ${(o.conditions?.activeSignals||[]).slice(0,3).join(',')} | held ${o.durationMinutes}min`
+    ).join('\n');
+
+    const prompt = `You are a quantitative trading analyst reviewing a crypto trading bot's performance.
+
+OVERALL STATS (${tradeOutcomes.length} closed trades):
+Win rate: ${(winRate*100).toFixed(1)}%
+Average P&L per trade: ${avgPnl.toFixed(2)}%
+
+SIGNAL PERFORMANCE:
+${conditionSummary || 'Not enough data per signal yet'}
+
+RECENT TRADES:
+${recentOutcomes}
+
+CURRENT SIGNAL WEIGHTS:
+${JSON.stringify(signalWeights, null, 2)}
+
+Based on this data, suggest weight adjustments to improve future performance.
+
+Return ONLY this JSON (no markdown):
+{
+  "weightAdjustments": { "rsi_oversold": 1.2, "hammer": 0.9 },
+  "keyInsight": "One sentence — most important pattern discovered",
+  "winningPattern": "What conditions appear in most winning trades",
+  "losingPattern": "What conditions appear in most losing trades",
+  "recommendedConfidenceMin": 75,
+  "recommendedMinHoldMinutes": 60
+}
+
+Only include signals with 5+ occurrences. Weight range: 0.3-2.0. Max change 0.3 per session.`;
+
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 30000);
+    const response   = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type':'application/json', 'x-api-key':process.env.ANTHROPIC_API_KEY, 'anthropic-version':'2023-06-01' },
+      body: JSON.stringify({ model:'claude-sonnet-4-6', max_tokens:600, messages:[{ role:'user', content:prompt }] })
+    });
+    clearTimeout(timeout);
+
+    const data    = await response.json();
+    const text    = (data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('').trim();
+    const match   = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON in response');
+    const learning = JSON.parse(match[0]);
+
+    let changesApplied = 0;
+    if (learning.weightAdjustments) {
+      Object.entries(learning.weightAdjustments).forEach(([key, val]) => {
+        if (signalWeights.hasOwnProperty(key)) {
+          const newWeight = Math.max(0.3, Math.min(2.0, parseFloat(val)));
+          if (Math.abs(newWeight - signalWeights[key]) > 0.05) {
+            console.log(`[LEARNING] ${key}: ${signalWeights[key].toFixed(2)} → ${newWeight.toFixed(2)}`);
+            signalWeights[key] = newWeight;
+            changesApplied++;
+          }
+        }
+      });
+    }
+
+    if (learning.recommendedConfidenceMin &&
+        Math.abs(learning.recommendedConfidenceMin - botConfig.confidenceMin) >= 5) {
+      botConfig.confidenceMin = Math.max(65, Math.min(90, learning.recommendedConfidenceMin));
+    }
+
+    learningLog.unshift({
+      timestamp: new Date().toISOString(),
+      tradesAnalysed: tradeOutcomes.length,
+      winRate: parseFloat((winRate*100).toFixed(1)),
+      avgPnl:  parseFloat(avgPnl.toFixed(2)),
+      changesApplied,
+      keyInsight:     learning.keyInsight,
+      winningPattern: learning.winningPattern,
+      losingPattern:  learning.losingPattern,
+      weightsAfter:   { ...signalWeights },
+    });
+    if (learningLog.length > 50) learningLog = learningLog.slice(0, 50);
+    saveData();
+
+    console.log(`[LEARNING] ✅ ${changesApplied} changes applied — ${learning.keyInsight}`);
+
+    if (changesApplied > 0) {
+      await sendTelegram(
+        `🧠 <b>Bot Learning Update</b>\n\n` +
+        `Analysed ${tradeOutcomes.length} trades\n` +
+        `Win rate: ${(winRate*100).toFixed(1)}% | Avg P&L: ${avgPnl.toFixed(2)}%\n\n` +
+        `<b>Key insight:</b> ${learning.keyInsight}\n` +
+        `<b>Winning signals:</b> ${learning.winningPattern}\n` +
+        `<b>Losing signals:</b> ${learning.losingPattern}\n\n` +
+        `${changesApplied} signal weights adjusted 🎯`
+      );
+    }
+  } catch(e) { console.warn('[LEARNING] Failed:', e.message); }
+}
+
+app.get('/api/learning/weights', requireAuth, (req, res) => {
+  res.json({ success:true, data:{ signalWeights, learningLog, tradeOutcomes:tradeOutcomes.slice(-20), enabled:learningEnabled } });
+});
+app.post('/api/learning/run', requireAuth, async (req, res) => {
+  lastLearnAt = 0;
+  res.json({ success:true, message:'Learning session started — check Telegram!' });
+  learnFromOutcomes();
+});
+app.post('/api/learning/reset', requireAuth, (req, res) => {
+  Object.keys(signalWeights).forEach(k => signalWeights[k] = 1.0);
+  learningLog = [];
+  saveData();
+  res.json({ success:true, message:'Signal weights reset to defaults' });
+});
+app.post('/api/learning/toggle', requireAuth, (req, res) => {
+  learningEnabled = !learningEnabled;
+  res.json({ success:true, enabled:learningEnabled });
+});
+
 // ─── Smart Money API Routes ───────────────────────────────────
 app.get('/api/smartmoney/wallets', requireAuth, (req, res) => {
   res.json({ success: true, data: smartWallets, enabled: smartMoneyEnabled });
@@ -3255,69 +3525,243 @@ async function fetchBenchmarkData() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// PERFORMANCE REPORT — Full intelligence on bot improvement
+// ══════════════════════════════════════════════════════════════
 async function calculatePerformance(days = 30) {
   try {
-    if (portfolioHistory.length < 2) return null;
+    const now   = Date.now();
+    const start = now - days * 24 * 60 * 60 * 1000;
 
-    const now      = Date.now();
-    const start    = now - days * 24 * 60 * 60 * 1000;
+    // Portfolio value progression
     const relevant = portfolioHistory.filter(p => p.timestamp >= start);
-    if (relevant.length < 2) return null;
-
-    const first = relevant[0];
-    const last  = relevant[relevant.length - 1];
-    const botReturn = ((last.valueAUD - first.valueAUD) / first.valueAUD) * 100;
-
-    // BTC benchmark
-    const btcPrices = await fetchBenchmarkData();
-    let btcReturn   = 0;
-    if (btcPrices.length >= 2) {
-      const btcStart = btcPrices.find(p => p[0] >= start)?.[1] || btcPrices[0][1];
-      const btcEnd   = btcPrices[btcPrices.length - 1][1];
-      btcReturn      = ((btcEnd - btcStart) / btcStart) * 100;
+    let portfolioReturn = null;
+    if (relevant.length >= 2) {
+      const first = relevant[0], last = relevant[relevant.length-1];
+      portfolioReturn = {
+        startValue: first.valueAUD, endValue: last.valueAUD,
+        returnPct:  parseFloat((((last.valueAUD-first.valueAUD)/first.valueAUD)*100).toFixed(2)),
+        dataPoints: relevant.length,
+        history:    relevant.slice(-30),
+      };
     }
 
-    // Win rate from trade log
-    const periodTrades  = tradeLog.filter(t => new Date(t.timestamp).getTime() >= start);
-    const sells         = periodTrades.filter(t => t.type === 'sell');
-    const profitableSells = sells.filter(t => (t.realisedPnl || 0) > 0);
-    const winRate       = sells.length ? (profitableSells.length / sells.length) * 100 : 0;
+    // Trade outcomes in period
+    const periodOutcomes = tradeOutcomes.filter(t => new Date(t.timestamp).getTime() >= start);
+    const wins   = periodOutcomes.filter(t => t.won);
+    const losses = periodOutcomes.filter(t => !t.won);
+    const winRate     = periodOutcomes.length ? (wins.length/periodOutcomes.length)*100 : 0;
+    const avgWinPct   = wins.length   ? wins.reduce((s,t)=>s+t.pnlPct,0)/wins.length   : 0;
+    const avgLossPct  = losses.length ? losses.reduce((s,t)=>s+t.pnlPct,0)/losses.length : 0;
+    const avgHoldMins = periodOutcomes.length ? periodOutcomes.reduce((s,t)=>s+t.durationMinutes,0)/periodOutcomes.length : 0;
+    const totalPnl    = Object.values(pnlByAsset).reduce((s,a)=>s+a.realisedPnl,0);
+    const totalWinAUD = wins.reduce((s,t)=>s+(t.pnlAUD||0),0);
+    const totalLossAUD = Math.abs(losses.reduce((s,t)=>s+(t.pnlAUD||0),0));
+    const profitFactor = totalLossAUD > 0 ? totalWinAUD/totalLossAUD : totalWinAUD > 0 ? 999 : 0;
+    const sorted = [...periodOutcomes].sort((a,b)=>(b.pnlPct||0)-(a.pnlPct||0));
 
-    // Best and worst trades
-    const sortedSells = sells.sort((a,b) => (b.realisedPnl||0) - (a.realisedPnl||0));
-    const bestTrade   = sortedSells[0];
-    const worstTrade  = sortedSells[sortedSells.length - 1];
+    // Per-coin breakdown
+    const coinBreakdown = {};
+    periodOutcomes.forEach(t => {
+      if (!coinBreakdown[t.sym]) coinBreakdown[t.sym] = { wins:0, losses:0, totalPnl:0 };
+      if (t.won) coinBreakdown[t.sym].wins++;
+      else coinBreakdown[t.sym].losses++;
+      coinBreakdown[t.sym].totalPnl += t.pnlPct||0;
+    });
+
+    // BTC benchmark
+    let btcReturn = null;
+    try {
+      const btcPrices = await fetchBenchmarkData();
+      if (btcPrices?.length >= 2) {
+        const btcStart = btcPrices.find(p=>p[0]>=start)?.[1] || btcPrices[0][1];
+        const btcEnd   = btcPrices[btcPrices.length-1][1];
+        btcReturn      = parseFloat((((btcEnd-btcStart)/btcStart)*100).toFixed(2));
+      }
+    } catch(e) {}
+
+    // Learning progression — split all outcomes into thirds
+    const all   = tradeOutcomes.slice(-90);
+    const third = Math.floor(all.length/3);
+    let learningProgression = null;
+    if (all.length >= 9) {
+      const early  = all.slice(0, third);
+      const mid    = all.slice(third, third*2);
+      const recent = all.slice(third*2);
+      const wr = arr => arr.length ? arr.filter(t=>t.won).length/arr.length*100 : 0;
+      const ap = arr => arr.length ? arr.reduce((s,t)=>s+t.pnlPct,0)/arr.length : 0;
+      learningProgression = {
+        early:  { winRate:parseFloat(wr(early).toFixed(1)),  avgPnl:parseFloat(ap(early).toFixed(2)),  trades:early.length },
+        mid:    { winRate:parseFloat(wr(mid).toFixed(1)),    avgPnl:parseFloat(ap(mid).toFixed(2)),    trades:mid.length   },
+        recent: { winRate:parseFloat(wr(recent).toFixed(1)), avgPnl:parseFloat(ap(recent).toFixed(2)), trades:recent.length },
+        improving:    wr(recent) > wr(early),
+        winRateDelta: parseFloat((wr(recent)-wr(early)).toFixed(1)),
+        pnlDelta:     parseFloat((ap(recent)-ap(early)).toFixed(2)),
+      };
+    }
+
+    const weightChanges = Object.entries(signalWeights)
+      .filter(([,v]) => Math.abs(v-1.0) > 0.05)
+      .sort(([,a],[,b]) => Math.abs(b-1.0)-Math.abs(a-1.0))
+      .map(([k,v]) => ({ signal:k, weight:parseFloat(v.toFixed(2)), direction:v>1?'boosted':'reduced' }));
 
     return {
-      period:        days,
-      startValue:    first.valueAUD,
-      endValue:      last.valueAUD,
-      botReturn:     parseFloat(botReturn.toFixed(2)),
-      btcReturn:     parseFloat(btcReturn.toFixed(2)),
-      cashReturn:    0, // holding AUD = 0% return (inflation ignored)
-      alpha:         parseFloat((botReturn - btcReturn).toFixed(2)),
-      totalTrades:   periodTrades.length,
-      winRate:       parseFloat(winRate.toFixed(1)),
-      bestTrade:     bestTrade ? { sym:bestTrade.sym, pnl:bestTrade.realisedPnl } : null,
-      worstTrade:    worstTrade ? { sym:worstTrade.sym, pnl:worstTrade.realisedPnl } : null,
-      dataPoints:    relevant.length,
-      outperforming: botReturn > btcReturn,
+      period: days, generated: new Date().toISOString(),
+      portfolio: portfolioReturn, btcReturn,
+      alpha: portfolioReturn && btcReturn !== null
+        ? parseFloat((portfolioReturn.returnPct - btcReturn).toFixed(2)) : null,
+      trades: {
+        total: tradeLog.filter(t=>new Date(t.timestamp).getTime()>=start).length,
+        closed: periodOutcomes.length,
+        wins: wins.length, losses: losses.length,
+        winRate: parseFloat(winRate.toFixed(1)),
+        avgWinPct: parseFloat(avgWinPct.toFixed(2)),
+        avgLossPct: parseFloat(avgLossPct.toFixed(2)),
+        avgHoldMins: Math.round(avgHoldMins),
+        profitFactor: parseFloat(profitFactor.toFixed(2)),
+        totalPnlAUD: parseFloat(totalPnl.toFixed(2)),
+        bestTrade:  sorted[0] || null,
+        worstTrade: sorted[sorted.length-1] || null,
+        coinBreakdown,
+        recentOutcomes: periodOutcomes.slice(-10).reverse(),
+      },
+      learning: {
+        sessionsRun: learningLog.length,
+        lastSession: learningLog[0] || null,
+        progression: learningProgression,
+        weightChanges,
+        totalWeightsAdjusted: weightChanges.length,
+        learningLog: learningLog.slice(0,5),
+        currentWeights: signalWeights,
+      },
     };
   } catch(e) {
-    console.warn('[BENCHMARK] Calc failed:', e.message);
+    console.warn('[PERFORMANCE] Failed:', e.message);
     return null;
   }
 }
 
 app.get('/api/performance', requireAuth, async (req, res) => {
   try {
-    const days    = parseInt(req.query.days) || 30;
-    const perf    = await calculatePerformance(days);
-    res.json({ success:true, data: perf });
+    const days = parseInt(req.query.days) || 30;
+    const perf = await calculatePerformance(days);
+    res.json({ success:true, data:perf });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
-// ── Smart Money Status in /health ─────────────────────────────
+app.post('/api/performance/report', requireAuth, async (req, res) => {
+  res.json({ success:true, message:'Generating report — check Telegram!' });
+  try {
+    const perf = await calculatePerformance(30);
+    if (!perf) { await sendTelegram('📊 Not enough data yet — keep the bot running to generate a report.'); return; }
+    const t = perf.trades, l = perf.learning, prog = l.progression;
+    await sendTelegram(
+      `📊 <b>KRAKN·AI Performance Report</b>\n` +
+      `Generated: ${new Date().toLocaleString('en-AU',{timeZone:'Australia/Sydney',dateStyle:'short',timeStyle:'short'})}\n\n` +
+
+      `<b>Portfolio (30 days)</b>\n` +
+      `${perf.portfolio ? `Return: ${perf.portfolio.returnPct>=0?'+':''}${perf.portfolio.returnPct}%\n` : 'Insufficient history\n'}` +
+      `vs BTC: ${perf.btcReturn!==null?`${perf.btcReturn>=0?'+':''}${perf.btcReturn}%`:'N/A'}\n` +
+      `Alpha: ${perf.alpha!==null?`${perf.alpha>=0?'+':''}${perf.alpha}%`:'N/A'}\n\n` +
+
+      `<b>Trading Stats</b>\n` +
+      `Closed trades: ${t.closed}\n` +
+      `Win rate: ${t.winRate}% (${t.wins}W / ${t.losses}L)\n` +
+      `Avg win: +${t.avgWinPct}% | Avg loss: ${t.avgLossPct}%\n` +
+      `Profit factor: ${t.profitFactor} ${t.profitFactor>=1.5?'✅':t.profitFactor>=1?'⚠️':'❌'}\n` +
+      `Avg hold time: ${t.avgHoldMins} minutes\n` +
+      (t.bestTrade  ? `Best trade: ${t.bestTrade.sym} +${t.bestTrade.pnlPct}%\n`  : '') +
+      (t.worstTrade ? `Worst trade: ${t.worstTrade.sym} ${t.worstTrade.pnlPct}%\n` : '') +
+
+      `\n<b>🧠 Learning Progress</b>\n` +
+      `Sessions run: ${l.sessionsRun}\n` +
+      `Weights adjusted: ${l.totalWeightsAdjusted} signals\n` +
+      (prog ? `Early win rate: ${prog.early.winRate}% → Recent: ${prog.recent.winRate}% (${prog.winRateDelta>=0?'+':''}${prog.winRateDelta}%)\n` +
+              `${prog.improving ? '📈 Bot is improving over time' : '📉 Still learning — more trades needed'}\n` : 'Need 9+ trades for progression data\n') +
+      (l.lastSession?.keyInsight ? `\nLatest insight: ${l.lastSession.keyInsight}` : '')
+    );
+  } catch(e) { console.error('[REPORT]', e.message); }
+});
+
+// ══════════════════════════════════════════════════════════════
+// WAITLIST — Captures signups from landing page
+// Stores locally + optionally sends to Mailchimp
+// ══════════════════════════════════════════════════════════════
+
+app.post('/api/waitlist', async (req, res) => {
+  // CORS — allow landing page on GitHub Pages to call this
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  try {
+    const { name, email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    // Prevent duplicates
+    if (waitlistSignups.find(s => s.email === email)) {
+      return res.json({ success: true, message: 'Already on waitlist' });
+    }
+
+    const signup = { name: name || '', email, timestamp: new Date().toISOString() };
+    waitlistSignups.push(signup);
+    saveData();
+
+    console.log(`[WAITLIST] New signup: ${name} <${email}>`);
+
+    // Optional — send to Mailchimp if API key is configured
+    const MAILCHIMP_KEY      = process.env.MAILCHIMP_API_KEY;
+    const MAILCHIMP_LIST_ID  = process.env.MAILCHIMP_LIST_ID;
+    const MAILCHIMP_DC       = MAILCHIMP_KEY?.split('-').pop(); // e.g. us21
+
+    if (MAILCHIMP_KEY && MAILCHIMP_LIST_ID) {
+      try {
+        const mcRes = await fetch(
+          `https://${MAILCHIMP_DC}.api.mailchimp.com/3.0/lists/${MAILCHIMP_LIST_ID}/members`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Basic ${Buffer.from(`anystring:${MAILCHIMP_KEY}`).toString('base64')}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              email_address: email,
+              status:        'subscribed',
+              merge_fields:  { FNAME: name?.split(' ')[0] || '', LNAME: name?.split(' ').slice(1).join(' ') || '' }
+            })
+          }
+        );
+        if (mcRes.ok) console.log(`[WAITLIST] Added to Mailchimp: ${email}`);
+        else {
+          const err = await mcRes.json();
+          // 400 with "Member Exists" is fine
+          if (err.title !== 'Member Exists') console.warn('[WAITLIST] Mailchimp error:', err.detail);
+        }
+      } catch(e) { console.warn('[WAITLIST] Mailchimp failed:', e.message); }
+    }
+
+    // Notify yourself on Telegram when someone signs up
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
+      await sendTelegram(`🎉 <b>New waitlist signup!</b>\n\n👤 ${name}\n📧 ${email}\n\nTotal signups: ${waitlistSignups.length}`);
+    }
+
+    res.json({ success: true, message: 'Added to waitlist', total: waitlistSignups.length });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Handle CORS preflight for waitlist
+app.options('/api/waitlist', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.sendStatus(200);
+});
+
+// View all waitlist signups
+app.get('/api/waitlist', requireAuth, (req, res) => {
+  res.json({ success: true, data: waitlistSignups, total: waitlistSignups.length });
+});
 app.get('/api/chart/snapshot/:pair', requireAuth, async (req, res) => {
   try {
     const pair     = req.params.pair.toUpperCase();
@@ -3609,18 +4053,28 @@ async function executeSell(holding, ticker, source, reason, dp, signal = null) {
     };
     botState.sellsCount++;
 
-    const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
+    const sydneyTime  = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
     const realisedPnl = pnlByAsset[holding.sym]?.realisedPnl || 0;
+
+    // This trade P&L — calculated before recordTrade updates the asset
+    const thisTradeAUD = pnl.unrealisedPnl;
+    const thisTradePct = pnl.pnlPct;
+    const thisBuyPrice = pnl.avgBuyPrice;
+
+    const tradeResult  = thisBuyPrice > 0
+      ? `\n💰 <b>This trade: ${thisTradeAUD >= 0 ? '🟢 +' : '🔴 '}${fmtAUDServer(Math.abs(thisTradeAUD))} (${thisTradeAUD >= 0 ? '+' : ''}${thisTradePct.toFixed(2)}%)</b>\n` +
+        `Bought at: ${fmtAUDServer(thisBuyPrice)} → Sold at: ${fmtAUDServer(ticker.price)}`
+      : '';
 
     await sendTelegram(
       `🔴 <b>SELL COMPLETED!</b>\n\n` +
       `<b>${dp}</b>\n` +
       `Sold: ${sellVolume} ${holding.sym}\n` +
-      `Price: ${fmtAUDServer(ticker.price)}\n` +
-      `Value: ≈ ${fmtAUDServer(parseFloat(sellValueAUD))}\n` +
-      `TXID: ${order.txid?.join(', ')}\n` +
-      `${pnlStr}\n` +
-      `Total realised P&L (${holding.sym}): ${realisedPnl >= 0 ? '🟢 +' : '🔴 '}${fmtAUDServer(realisedPnl)}\n\n` +
+      `Price: ${fmtAUDServer(ticker.price, holding.pair)}\n` +
+      `Value: ≈ ${fmtAUDServer(parseFloat(sellValueAUD), holding.pair)}\n` +
+      `TXID: ${order.txid?.join(', ')}` +
+      `${tradeResult}\n\n` +
+      `All-time P&L (${holding.sym}): ${realisedPnl >= 0 ? '+' : ''}${fmtAUDServer(realisedPnl, holding.pair)}\n` +
       `⏰ ${sydneyTime} AEST`
     );
 
@@ -4288,54 +4742,25 @@ app.listen(PORT, () => {
   scheduleAdvisor();
   scheduleBuyCheck();
   scheduleDCA();
-  // Volume anomaly check every 15 minutes (Sprint 1)
+
+  // ── Recurring intervals (start immediately after boot, run every N minutes) ──
   setInterval(async () => { try { await checkVolumeAnomalies(); } catch(e) { console.error("[VOLUME]", e.message); } }, 15 * 60 * 1000);
-  setTimeout(async () => { try { await checkVolumeAnomalies(); } catch(e){} }, 90000);
+  setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART MONEY]', e.message); } }, 15 * 60 * 1000);
+  setInterval(async () => { try { await checkMacroEvents(); }       catch(e) { console.error('[MACRO]', e.message); } }, 30 * 60 * 1000);
+  setInterval(async () => { try { await checkGridOrders(); }        catch(e) { console.error('[GRID]', e.message); } }, 5 * 60 * 1000);
+  setInterval(async () => { try { await checkAndRebalance(); }      catch(e) { console.error('[REBALANCE]', e.message); } }, 4 * 60 * 60 * 1000);
+  setInterval(async () => { try { await buildCorrelationMatrix(); } catch(e) { console.error('[CORRELATION]', e.message); } }, 6 * 60 * 60 * 1000);
+  setInterval(async () => { try { await recordPortfolioSnapshot(); } catch(e) { console.error('[PORTFOLIO]', e.message); } }, 6 * 60 * 60 * 1000);
 
-  // Smart money wallet scanner — every 15 minutes
-  setInterval(async () => {
-    try { await checkSmartMoneySignals(); }
-    catch(e) { console.error('[SMART MONEY] Scan error:', e.message); }
-  }, 15 * 60 * 1000);
-  setTimeout(async () => {
-    try { await checkSmartMoneySignals(); }
-    catch(e) { console.error('[SMART MONEY] First scan error:', e.message); }
-  }, 3 * 60 * 1000);
-
-  // Macro event calendar — check every 30 minutes
-  setInterval(async () => {
-    try { await checkMacroEvents(); }
-    catch(e) { console.error('[MACRO] Check error:', e.message); }
-  }, 30 * 60 * 1000);
-  setTimeout(async () => { try { await checkMacroEvents(); } catch(e){} }, 2 * 60 * 1000);
-
-  // Grid trading — check every 5 minutes
-  setInterval(async () => {
-    try { await checkGridOrders(); }
-    catch(e) { console.error('[GRID] Check error:', e.message); }
-  }, 5 * 60 * 1000);
-
-  // Portfolio rebalancing — check every 4 hours
-  setInterval(async () => {
-    try { await checkAndRebalance(); }
-    catch(e) { console.error('[REBALANCE] Error:', e.message); }
-  }, 4 * 60 * 60 * 1000);
-
-  // Correlation matrix — build once on startup then every 6 hours
-  setTimeout(async () => { try { await buildCorrelationMatrix(); } catch(e){} }, 5 * 60 * 1000);
-  setInterval(async () => {
-    try { await buildCorrelationMatrix(); }
-    catch(e) { console.error('[CORRELATION] Build error:', e.message); }
-  }, 6 * 60 * 60 * 1000);
-  // Daily portfolio snapshot for performance graph (every 6 hours)
-  setTimeout(async () => {
-    try { await recordPortfolioSnapshot(); } catch(e) { console.error('[PORTFOLIO] Snapshot error:', e.message); }
-  }, 30000);
-  setInterval(async () => {
-    try { await recordPortfolioSnapshot(); } catch(e) { console.error('[PORTFOLIO] Snapshot error:', e.message); }
-  }, 6 * 60 * 60 * 1000);
-  setTimeout(registerTelegramWebhook, 3000);
-  setTimeout(() => { if (advisorSettings.enabled) runAdvisor(); }, 15000);
+  // ── DELAYED FIRST RUNS — all heavy tasks wait until AFTER Railway health check ──
+  // Railway health check window is 30 seconds. Nothing heavy before 60s.
+  setTimeout(registerTelegramWebhook, 3000); // webhook is lightweight, OK early
+  setTimeout(async () => { try { await recordPortfolioSnapshot(); } catch(e){} }, 60 * 1000);      // 1 min
+  setTimeout(async () => { try { await checkVolumeAnomalies(); }    catch(e){} }, 90 * 1000);      // 1.5 min
+  setTimeout(() => { if (advisorSettings.enabled) runAdvisor(); },  2 * 60 * 1000);               // 2 min
+  setTimeout(async () => { try { await checkMacroEvents(); }        catch(e){} }, 3 * 60 * 1000); // 3 min
+  setTimeout(async () => { try { await checkSmartMoneySignals(); }  catch(e){} }, 4 * 60 * 1000); // 4 min
+  setTimeout(async () => { try { await buildCorrelationMatrix(); }  catch(e){} }, 7 * 60 * 1000); // 7 min
 });
 
 module.exports = app;
