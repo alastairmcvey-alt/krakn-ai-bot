@@ -4010,17 +4010,36 @@ async function runAutoSellCheck() {
 
 // ─── Execute Sell (reusable) ───────────────────────────────────
 async function executeSell(holding, ticker, source, reason, dp, signal = null) {
-  const minVol  = MIN_VOLUMES[holding.sym] || 0.0001;
-  const sellQty = holding.qty;
+  const minVol = MIN_VOLUMES[holding.sym] || 0.0001;
 
-  if (sellQty < minVol) {
-    console.log(`[SELL] ${dp} skipped — ${sellQty.toFixed(8)} below Kraken minimum ${minVol}`);
+  // ── Always fetch actual balance from Kraken before selling ──
+  // This prevents EOrder:Insufficient funds caused by fee differences
+  let actualQty = holding.qty;
+  try {
+    const bal       = await krakenPrivateRequest('Balance');
+    const assetKeys = [`X${holding.sym}`, holding.sym, `Z${holding.sym}`];
+    for (const key of assetKeys) {
+      if (bal[key] && parseFloat(bal[key]) > 0) {
+        actualQty = parseFloat(bal[key]);
+        break;
+      }
+    }
+    // Apply 99.5% to avoid rounding issues with Kraken's precision
+    actualQty = Math.floor(actualQty * 0.995 * 1e8) / 1e8;
+    console.log(`[SELL] ${holding.sym} actual balance: ${actualQty} (bot thought: ${holding.qty})`);
+  } catch(e) {
+    console.warn(`[SELL] Could not fetch live balance for ${holding.sym}, using tracked qty:`, e.message);
+    actualQty = holding.qty * 0.995; // safety buffer if balance fetch fails
+  }
+
+  if (actualQty < minVol) {
+    console.log(`[SELL] ${dp} skipped — ${actualQty.toFixed(8)} below Kraken minimum ${minVol}`);
     return;
   }
 
-  const sellVolume   = sellQty.toFixed(8);
-  const sellValueAUD = (sellQty * ticker.price).toFixed(2);
-  const pnl          = getUnrealisedPnl(holding.sym, ticker.price, holding.qty);
+  const sellVolume   = actualQty.toFixed(8);
+  const sellValueAUD = (actualQty * ticker.price).toFixed(2);
+  const pnl     = getUnrealisedPnl(holding.sym, ticker.price, actualQty);
   const pnlStr       = pnl.avgBuyPrice > 0
     ? `\nP&L on this trade: ${pnl.unrealisedPnl >= 0 ? '🟢 +' : '🔴 '}${fmtAUDServer(pnl.unrealisedPnl)} (${pnl.pnlPct.toFixed(1)}%)`
     : '';
@@ -4037,11 +4056,26 @@ async function executeSell(holding, ticker, source, reason, dp, signal = null) {
   );
 
   try {
-    const order = await krakenPrivateRequest('AddOrder', {
-      pair: holding.pair, type: 'sell', ordertype: 'market', volume: sellVolume,
-    });
+    let order;
+    try {
+      order = await krakenPrivateRequest('AddOrder', {
+        pair: holding.pair, type: 'sell', ordertype: 'market', volume: sellVolume,
+      });
+    } catch(firstErr) {
+      // If insufficient funds, try with 98% of volume (handles rounding edge cases)
+      if (firstErr.message?.includes('Insufficient') || firstErr.message?.includes('EOrder')) {
+        console.warn(`[SELL] First attempt failed (${firstErr.message}) — retrying with 98% volume`);
+        const retryVolume = (actualQty * 0.98).toFixed(8);
+        order = await krakenPrivateRequest('AddOrder', {
+          pair: holding.pair, type: 'sell', ordertype: 'market', volume: retryVolume,
+        });
+        console.log(`[SELL] Retry succeeded with volume ${retryVolume}`);
+      } else {
+        throw firstErr;
+      }
+    }
 
-    // Record in P&L tracker
+    // Record in P&L tracker using actual quantity sold
     recordTrade(holding.pair, holding.sym, 'sell', sellVolume, ticker.price, source);
 
     botState.lastSell = {
