@@ -2005,7 +2005,19 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
     const posMultiplier = bestOpportunity.signal?.positionSizeMultiplier || 1.0;
     const baseSizeAUD   = Math.min(cashForPair * 0.25, cashForPair - 10);
     const suggestedAUD  = Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40); // never more than 40% of cash
-    if (suggestedAUD < 5) return;
+    if (suggestedAUD < 5) {
+      console.log(`[BUY CHECK] suggestedAUD too small (${suggestedAUD.toFixed(2)}) — cash: ${cashForPair.toFixed(2)}`);
+      if (manualTrigger) {
+        await sendTelegram(
+          `⚠️ <b>Buy opportunity found but insufficient cash</b>\n\n` +
+          `${bestOpportunity.displayPair} at ${bestOpportunity.confidence}% confidence\n` +
+          `Available ${pairCurr} cash: ${fmtAUDServer(cashForPair)}\n` +
+          `Minimum required: A$10\n\n` +
+          `Deposit more funds to Kraken or reduce your minimum trade size.`
+        );
+      }
+      return false;
+    }
 
     const volume   = (suggestedAUD / bestOpportunity.price).toFixed(8);
     const topPat   = bestOpportunity.patterns[0];
@@ -2342,6 +2354,7 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       const fearGreed = await fetchFearGreed();
       const fgStr     = fearGreed.value ? `😱 Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label})\n\n` : '';
       const results   = [];
+      const scanData  = []; // reuse for buy check so same signals are used
 
       // Limit to 4 pairs in Telegram scan to avoid timeout
       const scanPairs = getActivePairs(botConfig.currencyMode).slice(0, 4);
@@ -2349,28 +2362,39 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       for (const pair of scanPairs) {
         try {
           const signal  = await computeSignalForPair(pair);
-          // Guard against null/broken signal
-          if (!signal || !signal.action) {
-            results.push(`⚠️ <b>${PAIR_DISPLAY[pair]||pair}</b> — signal unavailable`);
-            continue;
-          }
-          await new Promise(r => setTimeout(r, 500)); // stagger
+          await new Promise(r => setTimeout(r, 500));
           const ticker  = await fetchSingleTicker(pair);
+          if (!ticker) continue;
           const dp      = PAIR_DISPLAY[pair] || pair;
           const sym     = dp.replace('/AUD','').replace('/USD','');
           const sent    = sentimentCache[sym] || { score:0, label:'Unknown' };
           const topPat  = signal.patterns?.[0];
 
-          const emoji   = signal.action === 'BUY'  ? '🟢' :
-                          signal.action === 'SELL' ? '🔴' : '🟡';
+          // Guard against null/broken signal
+          if (!signal || !signal.action) {
+            results.push(`⚠️ <b>${dp}</b> — signal unavailable`);
+            continue;
+          }
+
+          const emoji = signal.action === 'BUY'  ? '🟢' :
+                        signal.action === 'SELL' ? '🔴' : '🟡';
 
           results.push(
             `${emoji} <b>${dp}</b> — ${fmtAUDServer(ticker?.price || 0, pair)}\n` +
             `${signal.action} ${signal.confidence}% | Score: ${signal.weightedScore} | RSI: ${signal.rsi}\n` +
+            `Regime: ${signal.regime || 'UNKNOWN'}\n` +
             `Sentiment: ${sent.score}/10 (${sent.label})\n` +
             (topPat ? `Pattern: ${topPat.name} — ${topPat.signal}\n` : '') +
             (signal.signals?.length ? `Signals: ${signal.signals.slice(0,2).join(', ')}` : 'No strong signals')
           );
+
+          // Store for buy check reuse
+          scanData.push({
+            pair, displayPair: dp, sym,
+            price: ticker.price, change24h: ticker.change24h,
+            high: ticker.high, low: ticker.low,
+            signal, // pass signal directly so buy check uses same result
+          });
         } catch(e) { console.warn(`[SIGNAL SCAN] ${pair}:`, e.message); }
       }
 
@@ -2379,7 +2403,26 @@ async function handleTelegramMessage(chatId, userMessage, username) {
         : '⚠️ Could not fetch signals. Try again in a moment.';
 
       await sendTelegramTo(chatId, summary);
-      await checkBuyOpportunity();
+
+      // Pass scan results directly — avoids re-running signals and getting different results
+      const found = await checkBuyOpportunities(scanData, true);
+      if (!found) {
+        // Explain exactly why each coin was skipped
+        const reasons = scanData.map(d => {
+          const s = d.signal;
+          if (!s) return `• ${d.displayPair}: signal error`;
+          if (s.action !== 'BUY') return `• ${d.displayPair}: ${s.action} signal (${s.confidence}%)`;
+          if (s.confidence < advisorSettings.minConfidence) return `• ${d.displayPair}: confidence ${s.confidence}% below threshold ${advisorSettings.minConfidence}%`;
+          return `• ${d.displayPair}: BUY ${s.confidence}% — passed filters`;
+        }).join('\n');
+
+        await sendTelegramTo(chatId,
+          `🔍 <b>No buy triggered</b>\n\n${reasons}\n\n` +
+          `Threshold: ${advisorSettings.minConfidence}% confidence\n` +
+          `Cash required: minimum A$10\n` +
+          `Tip: Fear & Greed at ${fearGreed.value||'?'}/100 — wait for stronger signals or lower your confidence threshold in bot settings.`
+        );
+      }
 
     } catch(e) {
       await sendTelegramTo(chatId, '❌ Signal scan failed: ' + e.message);
