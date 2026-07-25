@@ -444,7 +444,7 @@ function recordTrade(pair, sym, type, volume, price, source = 'manual', signalCo
   }
 
   asset.tradeCount++;
-  console.log(`[P&L] ${type.toUpperCase()} ${vol || volume} ${sym} @ ${fmtAUDServer(price, pair)} | realised: A$${asset.realisedPnl.toFixed(2)}`);
+  console.log(`[P&L] ${type.toUpperCase()} ${volume} ${sym} @ ${fmtAUDServer(price, pair)} | realised: A$${asset.realisedPnl.toFixed(2)}`);
   setTimeout(saveData, 100);
   return trade;
 }
@@ -1948,14 +1948,16 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
 
     for (const d of marketData) {
       try {
-        // Use full multi-indicator signal — same engine as dashboard
         const signal = d.signal || await computeSignalForPair(d.pair);
 
-        // Trigger on BUY signal with sufficient confidence
-        // OR RSI oversold even if confidence slightly below threshold
         const rsiOversold  = signal.rsi <= 32;
-        const strongSignal = signal.action === 'BUY' && signal.confidence >= advisorSettings.minConfidence;
-        const weakSignal   = signal.action === 'BUY' && rsiOversold && signal.confidence >= (advisorSettings.minConfidence - 10);
+        // Slightly lower threshold for scheduled checks vs manual (55 vs 65)
+        // so you don't miss real opportunities
+        const threshold    = manualTrigger ? advisorSettings.minConfidence : Math.max(55, advisorSettings.minConfidence - 10);
+        const strongSignal = signal.action === 'BUY' && signal.confidence >= threshold;
+        const weakSignal   = signal.action === 'BUY' && rsiOversold && signal.confidence >= (threshold - 10);
+
+        console.log(`[BUY CHECK] ${d.pair}: ${signal.action} ${signal.confidence}% (threshold: ${threshold}%) — ${strongSignal||weakSignal?'QUALIFIES':'skip'}`);
 
         if (!strongSignal && !weakSignal) continue;
 
