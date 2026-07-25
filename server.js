@@ -331,7 +331,7 @@ let advisorSettings = {
   enabled:       true,
   intervalHours: 4,   // Changed from 1h to 4h — reduces Claude API calls by 75%
   pairs:         ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD'],  // reduced from 7 to 5 pairs
-  minConfidence: 70,  // raised from 65 to reduce noise
+  minConfidence: 65,  // restored — 70 was too restrictive
   includeNews:   true,
   lastRun:       null,
 };
@@ -1453,12 +1453,12 @@ async function computeSignalForPair(pair) {
           }
         } else {
           regime = 'SIDEWAYS';
-          // In sideways: raise confidence threshold — most signals are noise
-          regimeModifier = 0.85;
-          allSignals.push(`↔️ Market regime: SIDEWAYS (mixed signals, choppy market)`);
-          // In sideways: only act on very strong signals
-          if (confidence < 80 && action !== 'HOLD') {
-            allSignals.push('↔️ Sideways regime: signal too weak to act, holding');
+          regimeModifier = 0.90; // mild penalty — don't kill signals completely
+          allSignals.push(`↔️ Market regime: SIDEWAYS (mixed signals)`);
+          // In sideways: only suppress very weak signals (below 65%)
+          // Was 80% — too aggressive, was killing all signals
+          if (confidence < 65 && action !== 'HOLD') {
+            allSignals.push('↔️ Sideways regime: weak signal suppressed');
             action = 'HOLD';
           }
         }
@@ -1881,23 +1881,20 @@ ${newsContext ? '\n📰 <b>NEWS:</b> [one sentence]' : ''}
 
 Only include coins above ${advisorSettings.minConfidence}% confidence. If none qualify say "No strong signals right now."`;
 
-    const advice = await callClaude(prompt, 900);
     if (advice) {
-      // Check if advisor notification is set to immediate or digest
       const advSetting = botConfig.notifications?.advisor;
       if (!advSetting || advSetting === 'off') {
         console.log('[ADVISOR] Notifications off — skipping Telegram');
       } else if (advSetting === '4h' || advSetting === '8h' || advSetting === 'daily') {
         queueNotification('advisor', 'AI Market Analysis', advice.replace(/<[^>]*>/g, '').slice(0, 300));
       } else {
-        await sendTelegram(advice); // immediate (legacy default)
+        await sendTelegram(advice);
       }
       console.log('[ADVISOR] Analysis complete');
     }
 
-    if (advisorSettings.intervalHours <= 1) {
-      await checkBuyOpportunities(enrichedMarket.map(d => ({ ...d, rsi: d.signal.rsi })));
-    }
+    // Always run buy check after advisor regardless of interval
+    await checkBuyOpportunities(enrichedMarket.map(d => ({ ...d, rsi: d.signal.rsi })));
 
   } catch(err) {
     console.error('[ADVISOR ERROR]', err.message);
@@ -1930,7 +1927,7 @@ async function checkBuyOpportunity() {
 }
 
 // ─── Buy Opportunity Detector ──────────────────────────────────
-async function checkBuyOpportunities(marketData) {
+async function checkBuyOpportunities(marketData, manualTrigger = false) {
   try {
     let audCash = 0, usdCash = 0;
     if (KRAKEN_API_KEY && KRAKEN_API_SECRET) {
@@ -1992,7 +1989,7 @@ async function checkBuyOpportunities(marketData) {
 
     if (!bestOpportunity) {
       console.log('[BUY CHECK] No qualifying opportunities this run');
-      return;
+      return false; // signal caller that nothing was found
     }
 
     const pairCurr     = pairCurrency(bestOpportunity.pair);
@@ -2108,6 +2105,7 @@ async function checkBuyOpportunities(marketData) {
       );
 
       console.log(`[BUY OPPORTUNITY] ${bestOpportunity.displayPair} RSI:${bestOpportunity.rsi} Conf:${bestOpportunity.confidence}% — prompt sent`);
+      return true; // signal caller that opportunity was found
     }
 
   } catch(e) {
@@ -2723,7 +2721,33 @@ app.post('/api/advisor/run', requireAuth, async (req, res) => {
 // Manual buy check trigger — forces immediate check without waiting for hourly timer
 app.post('/api/buycheck/run', requireAuth, async (req, res) => {
   res.json({ success: true, message: 'Running buy check now — check Telegram!' });
-  checkBuyOpportunity();
+  try {
+    const pairs = getActivePairs(botConfig.currencyMode);
+    const marketData = [];
+    for (const pair of pairs) {
+      try {
+        const ticker = await fetchSingleTicker(pair);
+        if (ticker) marketData.push({
+          pair,
+          displayPair: PAIR_DISPLAY[pair] || pair,
+          price: ticker.price, change24h: ticker.change24h,
+          high: ticker.high, low: ticker.low,
+        });
+      } catch(e) {}
+    }
+    const found = await checkBuyOpportunities(marketData, true); // true = manual trigger
+    if (!found) {
+      await sendTelegram(
+        `🔍 <b>Manual Buy Check Complete</b>\n\n` +
+        `Scanned ${pairs.length} pairs — no qualifying opportunities found right now.\n\n` +
+        `Signals need: BUY action + ${advisorSettings.minConfidence}%+ confidence\n` +
+        `Current regime filters may be suppressing weak signals.\n\n` +
+        `Try again in 30-60 minutes or lower confidence threshold in Bot settings.`
+      );
+    }
+  } catch(e) {
+    await sendTelegram(`❌ Buy check error: ${e.message}`);
+  }
 });
 
 app.get('/api/alerts', requireAuth, (req, res) => {
