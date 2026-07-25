@@ -99,11 +99,178 @@ function getActivePairs(mode) {
   return AUD_PAIRS; // default
 }
 
-// Detect base currency from pair name
-function pairCurrency(pair) {
-  if (pair.endsWith('AUD')) return 'AUD';
-  if (pair.endsWith('USD') || pair.endsWith('USDT')) return 'USD';
-  return 'AUD';
+// ─── Alpaca — US Stocks ────────────────────────────────────────
+const ALPACA_KEY      = (process.env.ALPACA_API_KEY    || '').trim();
+const ALPACA_SECRET   = (process.env.ALPACA_API_SECRET || '').trim();
+const ALPACA_BASE_URL = 'https://api.alpaca.markets/v2';
+const ALPACA_DATA_URL = 'https://data.alpaca.markets/v2';
+const ALPACA_PAPER    = process.env.ALPACA_PAPER === 'true'; // set to 'true' for paper trading
+
+// Popular US stocks — symbol only (no pair suffix)
+// These are treated as a separate asset class from Kraken crypto
+const US_STOCKS = [
+  // Tech mega-caps
+  'AAPL','MSFT','NVDA','GOOGL','AMZN','META','TSLA',
+  // Finance
+  'JPM','BAC','V','MA',
+  // ETFs
+  'SPY','QQQ','VTI','GLD',
+  // ASX-correlated US names popular with Australians
+  'BHP','RIO','LIT','COPX',
+];
+
+// Display names for US stocks
+US_STOCKS.forEach(s => {
+  if (!PAIR_DISPLAY[s]) PAIR_DISPLAY[s] = s + '/USD';
+});
+
+// Detect if a symbol is a US stock (not a crypto pair)
+function isStockSymbol(sym) {
+  return US_STOCKS.includes(sym) || (sym && !sym.includes('USD') && !sym.includes('AUD') && sym.length <= 5 && sym === sym.toUpperCase() && !/[0-9]/.test(sym));
+}
+
+// Updated active pairs — includes stocks when mode is STOCKS or ALL
+function getActivePairs(mode) {
+  if (mode === 'USD')    return USD_PAIRS;
+  if (mode === 'BOTH')   return [...AUD_PAIRS, ...USD_PAIRS];
+  if (mode === 'STOCKS') return US_STOCKS;
+  if (mode === 'ALL')    return [...AUD_PAIRS, ...USD_PAIRS, ...US_STOCKS];
+  return AUD_PAIRS; // default
+}
+
+// ─── Alpaca API Client ─────────────────────────────────────────
+async function alpacaRequest(path, method = 'GET', body = null, dataApi = false) {
+  if (!ALPACA_KEY || !ALPACA_SECRET) throw new Error('Alpaca keys not configured');
+  const base = dataApi ? ALPACA_DATA_URL : ALPACA_BASE_URL;
+  const url  = `${base}${path}`;
+  const opts = {
+    method,
+    headers: {
+      'APCA-API-KEY-ID':     ALPACA_KEY,
+      'APCA-API-SECRET-KEY': ALPACA_SECRET,
+      'Content-Type':        'application/json',
+    },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res  = await fetch(url, opts);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Alpaca ${res.status}: ${err}`);
+  }
+  return res.json();
+}
+
+// Fetch stock ticker from Alpaca
+async function fetchStockTicker(symbol) {
+  try {
+    const data = await alpacaRequest(`/stocks/${symbol}/snapshot`, 'GET', null, true);
+    const lat  = data.latestTrade   || {};
+    const laq  = data.latestQuote   || {};
+    const bar  = data.dailyBar      || {};
+    const prev = data.prevDailyBar  || {};
+    const price    = parseFloat(lat.p || laq.ap || bar.c || 0);
+    const prevClose = parseFloat(prev.c || price);
+    const change24h = prevClose > 0 ? (((price - prevClose) / prevClose) * 100).toFixed(2) : '0.00';
+    return {
+      price,
+      bid:      parseFloat(laq.bp || 0),
+      ask:      parseFloat(laq.ap || 0),
+      high:     parseFloat(bar.h  || 0),
+      low:      parseFloat(bar.l  || 0),
+      volume:   parseFloat(bar.v  || 0),
+      open:     parseFloat(bar.o  || prevClose),
+      change24h,
+      exchange: 'US',
+      assetType: 'stock',
+    };
+  } catch(e) {
+    console.warn(`[ALPACA TICKER] ${symbol} failed:`, e.message);
+    return null;
+  }
+}
+
+// Fetch OHLC bars from Alpaca (matches Kraken OHLC format)
+async function fetchStockBars(symbol, timeframe = '1Hour', limit = 60) {
+  try {
+    // Map our timeframe keys to Alpaca timeframe strings
+    const tfMap = { 15:'15Min', 60:'1Hour', 240:'4Hour', 1440:'1Day', 10080:'1Week' };
+    const tf    = tfMap[timeframe] || timeframe;
+    const end   = new Date().toISOString();
+    const start = new Date(Date.now() - limit * timeframeToMs(timeframe)).toISOString();
+
+    const data = await alpacaRequest(
+      `/stocks/${symbol}/bars?timeframe=${tf}&start=${start}&end=${end}&limit=${limit}&feed=iex`,
+      'GET', null, true
+    );
+
+    // Convert Alpaca bars to Kraken OHLC format [time, open, high, low, close, vwap, volume, count]
+    return (data.bars || []).map(b => [
+      Math.floor(new Date(b.t).getTime() / 1000),
+      b.o, b.h, b.l, b.c, b.vw || b.c, b.v, b.n || 0
+    ]);
+  } catch(e) {
+    console.warn(`[ALPACA BARS] ${symbol} failed:`, e.message);
+    return [];
+  }
+}
+
+function timeframeToMs(tf) {
+  const map = { 15: 15*60*1000, 60: 60*60*1000, 240: 4*60*60*1000, 1440: 24*60*60*1000, 10080: 7*24*60*60*1000 };
+  return map[tf] || 60*60*1000;
+}
+
+// Get Alpaca account info
+async function getAlpacaAccount() {
+  return alpacaRequest('/account');
+}
+
+// Get Alpaca positions
+async function getAlpacaPositions() {
+  return alpacaRequest('/positions');
+}
+
+// Place stock order via Alpaca
+async function placeStockOrder(symbol, side, qty, orderType = 'market', limitPrice = null) {
+  const body = {
+    symbol,
+    qty:        qty.toString(),
+    side,       // 'buy' or 'sell'
+    type:       orderType,
+    time_in_force: 'day',
+  };
+  if (orderType === 'limit' && limitPrice) body.limit_price = limitPrice.toString();
+  const base = ALPACA_PAPER ? 'https://paper-api.alpaca.markets/v2' : ALPACA_BASE_URL;
+  const res  = await fetch(`${base}/orders`, {
+    method:  'POST',
+    headers: {
+      'APCA-API-KEY-ID':     ALPACA_KEY,
+      'APCA-API-SECRET-KEY': ALPACA_SECRET,
+      'Content-Type':        'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Alpaca order failed: ${err}`);
+  }
+  return res.json();
+}
+
+// ─── Universal ticker — routes to Kraken or Alpaca ────────────
+async function fetchTickerUniversal(symbol) {
+  if (isStockSymbol(symbol)) return fetchStockTicker(symbol);
+  return fetchSingleTicker(symbol);
+}
+
+// ─── Universal OHLC — routes to Kraken or Alpaca ─────────────
+async function fetchOHLCUniversal(symbol, interval) {
+  if (isStockSymbol(symbol)) {
+    const bars = await fetchStockBars(symbol, interval, 60);
+    return bars; // already in Kraken-compatible format
+  }
+  const ohlc = await krakenPublicRequest('OHLC', { pair: symbol, interval });
+  const k    = Object.keys(ohlc).find(k => k !== 'last');
+  return ohlc[k] || [];
 }
 
 // Fallback pair names to try if primary fails
@@ -208,14 +375,15 @@ let tradeOutcomes = [];
 function recordTrade(pair, sym, type, volume, price, source = 'manual', signalConditions = null) {
   const valueAUD = parseFloat(volume) * parseFloat(price);
   const trade = {
-    id:                Date.now().toString(),
+    id:              Date.now().toString(),
     pair, sym, type,
-    volume:            parseFloat(volume),
-    price:             parseFloat(price),
+    volume:          parseFloat(volume),
+    price:           parseFloat(price),
     valueAUD,
-    timestamp:         new Date().toISOString(),
+    timestamp:       new Date().toISOString(),
     source,
-    signalConditions,  // Store what signals were active when this trade was made
+    signalConditions,
+    entryConditions: signalConditions, // always store for outcome matching
   };
   tradeLog.push(trade);
   if (tradeLog.length > 500) tradeLog = tradeLog.slice(-500);
@@ -223,53 +391,56 @@ function recordTrade(pair, sym, type, volume, price, source = 'manual', signalCo
   // Update P&L tracking
   if (!pnlByAsset[sym]) pnlByAsset[sym] = { avgBuyPrice:0, totalVolume:0, totalCost:0, realisedPnl:0, tradeCount:0 };
   const asset = pnlByAsset[sym];
+
   if (type === 'buy') {
     const newTotalCost   = asset.totalCost + valueAUD;
     const newTotalVolume = asset.totalVolume + parseFloat(volume);
     asset.avgBuyPrice    = newTotalCost / newTotalVolume;
     asset.totalVolume    = newTotalVolume;
     asset.totalCost      = newTotalCost;
-    // Store entry conditions for outcome tracking
-    if (signalConditions) {
-      trade.entryConditions = signalConditions;
-    }
+
   } else if (type === 'sell') {
     if (asset.avgBuyPrice > 0) {
-      const costBasis    = asset.avgBuyPrice * parseFloat(volume);
-      const proceeds     = valueAUD;
-      const pnl          = proceeds - costBasis;
-      const pnlPct       = ((proceeds - costBasis) / costBasis) * 100;
+      const vol      = parseFloat(volume);
+      const costBasis = asset.avgBuyPrice * vol;
+      const proceeds  = valueAUD;
+      const pnl       = proceeds - costBasis;
+      const pnlPct    = (pnl / costBasis) * 100;
       asset.realisedPnl += pnl;
-      asset.totalVolume  = Math.max(0, asset.totalVolume - parseFloat(volume));
+      asset.totalVolume  = Math.max(0, asset.totalVolume - vol);
       asset.totalCost    = asset.avgBuyPrice * asset.totalVolume;
 
-      // Find matching buy trade to record outcome
+      // Find the most recent buy trade for this asset — regardless of whether
+      // it has entryConditions (fixes report showing 0 trades)
       const matchingBuy = [...tradeLog].reverse().find(t =>
-        t.sym === sym && t.type === 'buy' && t.entryConditions
+        t.sym === sym && t.type === 'buy'
       );
-      if (matchingBuy?.entryConditions) {
-        const buyTime  = new Date(matchingBuy.timestamp).getTime();
-        const sellTime = new Date(trade.timestamp).getTime();
-        tradeOutcomes.push({
-          tradeId:         matchingBuy.id,
-          sym,
-          won:             pnl > 0,
-          pnlPct:          parseFloat(pnlPct.toFixed(2)),
-          pnlAUD:          parseFloat(pnl.toFixed(2)),
-          durationMinutes: Math.round((sellTime - buyTime) / 60000),
-          buyPrice:        matchingBuy.price,
-          sellPrice:       parseFloat(price),
-          conditions:      matchingBuy.entryConditions,
-          timestamp:       new Date().toISOString(),
-        });
-        if (tradeOutcomes.length > 200) tradeOutcomes = tradeOutcomes.slice(-200);
-        // Trigger learning after every closed trade
-        setTimeout(learnFromOutcomes, 2000);
-      }
+
+      // Always record outcome for the report and learning engine
+      tradeOutcomes.push({
+        tradeId:         matchingBuy?.id || trade.id,
+        sym,
+        won:             pnl > 0,
+        pnlPct:          parseFloat(pnlPct.toFixed(2)),
+        pnlAUD:          parseFloat(pnl.toFixed(2)),
+        durationMinutes: matchingBuy
+          ? Math.round((new Date(trade.timestamp) - new Date(matchingBuy.timestamp)) / 60000)
+          : 0,
+        buyPrice:        matchingBuy?.price || asset.avgBuyPrice,
+        sellPrice:       parseFloat(price),
+        source,
+        conditions:      matchingBuy?.entryConditions || signalConditions || {},
+        timestamp:       new Date().toISOString(),
+      });
+      if (tradeOutcomes.length > 200) tradeOutcomes = tradeOutcomes.slice(-200);
+
+      // Trigger learning after every 5th closed trade
+      if (tradeOutcomes.length % 5 === 0) setTimeout(learnFromOutcomes, 2000);
     }
   }
+
   asset.tradeCount++;
-  console.log(`[P&L] ${type.toUpperCase()} ${volume} ${sym} @ ${fmtAUDServer(price, pair)}`);
+  console.log(`[P&L] ${type.toUpperCase()} ${vol || volume} ${sym} @ ${fmtAUDServer(price, pair)} | realised: A$${asset.realisedPnl.toFixed(2)}`);
   setTimeout(saveData, 100);
   return trade;
 }
@@ -294,8 +465,12 @@ let botConfig = {
   checkInterval:      60,
   minHoldingValueAUD: 50,
   stopLossEnabled:    true,
-  stopLossPct:        8,
-  trailingStop:       false,
+  stopLossPct:        3,       // fallback if ATR unavailable
+  trailingStop:       true,
+  useATRStops:        true,    // dynamic ATR-based stop losses
+  atrMultiplier:      2.0,     // 2x ATR = professional standard for crypto
+  breakEvenTriggerPct: 2.0,   // move stop to entry price once up +2%
+  trailingTriggerPct:  4.0,   // activate trailing stop once up +4%
   minHoldMinutes:     60,
   currencyMode:       'AUD',
   autoBuy:            false,   // when true — bot buys automatically without YES/NO prompt
@@ -321,7 +496,8 @@ let portfolioHistory = []; // [{ date, valueAUD, timestamp }]
 let targetAllocation = {}; // { BTC: 40, ETH: 30, SOL: 20, cash: 10 }
 
 // ─── On-Chain Data Cache ───────────────────────────────────────
-let onChainCache = {}; // { sym: { data, fetchedAt } }
+let onChainCache    = {}; // { sym: { data, fetchedAt } }
+let fundingRateCache = {}; // { pair: { rate, fetchedAt } }
 
 // ─── Stop-Loss Peaks ──────────────────────────────────────────
 let stopLossPeaks = {};
@@ -716,6 +892,63 @@ function calcBollingerBands(closes, period = 20, stdDevMult = 2) {
   return { upper: parseFloat(upper.toFixed(2)), middle: parseFloat(middle.toFixed(2)), lower: parseFloat(lower.toFixed(2)), position };
 }
 
+// ─── ATR — Average True Range ─────────────────────────────────
+// Measures how much a coin typically moves per candle
+// Used to set stop losses that breathe with the market
+function calcATR(candles, period = 14) {
+  if (!candles || candles.length < period + 1) return null;
+  const trueRanges = [];
+  for (let i = 1; i < candles.length; i++) {
+    const high  = parseFloat(candles[i][2]);
+    const low   = parseFloat(candles[i][3]);
+    const prevClose = parseFloat(candles[i-1][4]);
+    const tr    = Math.max(
+      high - low,                     // candle range
+      Math.abs(high - prevClose),     // gap up
+      Math.abs(low  - prevClose)      // gap down
+    );
+    trueRanges.push(tr);
+  }
+  // Simple ATR average over period
+  const recent = trueRanges.slice(-period);
+  const atr    = recent.reduce((s,v) => s+v, 0) / recent.length;
+  const lastPrice = parseFloat(candles[candles.length-1][4]);
+  return {
+    atr,
+    atrPct:    (atr / lastPrice) * 100,   // ATR as % of price
+    lastPrice,
+    candles:   candles.length,
+  };
+}
+
+// Calculate the ideal stop loss % for a coin based on its ATR
+// Returns a % below entry price — varies with market volatility
+// ATR multiplier of 2.0 is the professional standard for crypto
+async function calcDynamicStopLoss(pair, multiplier = 2.0) {
+  try {
+    const candles1h = await fetchOHLCUniversal(pair, 60);
+    if (!candles1h || candles1h.length < 15) return null;
+    const atrData = calcATR(candles1h, 14);
+    if (!atrData) return null;
+
+    const stopPct   = atrData.atrPct * multiplier;
+    const minStop   = 1.0;   // never less than 1% — prevents hair-trigger exits
+    const maxStop   = 8.0;   // never more than 8% — limits max loss
+    const finalStop = Math.min(maxStop, Math.max(minStop, stopPct));
+
+    return {
+      stopPct:      parseFloat(finalStop.toFixed(2)),
+      atrPct:       parseFloat(atrData.atrPct.toFixed(2)),
+      atr:          parseFloat(atrData.atr.toFixed(6)),
+      multiplier,
+      recommendation: finalStop < 2 ? 'tight' : finalStop < 4 ? 'normal' : 'wide',
+    };
+  } catch(e) {
+    console.warn(`[ATR STOP] ${pair}:`, e.message);
+    return null;
+  }
+}
+
 function calcVolumeSignal(volumes, closes) {
   if (volumes.length < 10) return 'NEUTRAL';
   const recentVol = volumes.slice(-5).reduce((a,b) => a+b, 0) / 5;
@@ -730,9 +963,11 @@ function calcVolumeSignal(volumes, closes) {
 
 // Fetch OHLC and calculate all indicators for one timeframe
 async function analyseTimeframe(pair, interval) {
-  const ohlc   = await krakenPublicRequest('OHLC', { pair, interval });
-  const k      = Object.keys(ohlc).find(k => k !== 'last');
-  const candles = ohlc[k].slice(-50); // last 50 candles
+  // Route to Alpaca for stocks, Kraken for crypto
+  const candles = (await fetchOHLCUniversal(pair, interval)).slice(-50);
+  if (!candles || candles.length < 10) {
+    return { rsi:50, macd:{trend:'NEUTRAL'}, bb:{position:'MIDDLE'}, score:0, signals:[], patterns:[], volumes:[] };
+  }
   const closes  = candles.map(c => parseFloat(c[4]));
   const volumes = candles.map(c => parseFloat(c[6]));
 
@@ -773,7 +1008,7 @@ async function analyseTimeframe(pair, interval) {
   score += patScore.score;
   if (patScore.found.length) signals.push(...patScore.found.map(p => `Pattern: ${p}`));
 
-  return { interval, rsi, macd, bb, volSig, patterns, score, signals };
+  return { interval, rsi, macd, bb, volSig, patterns, score, signals, rawCandles: candles };
 }
 
 // ─── Sprint 1: Candlestick Pattern Recognition ────────────────
@@ -966,9 +1201,8 @@ async function checkVolumeAnomalies() {
       const lastAlert = volumeAnomalyCache[pair];
       if (lastAlert && (Date.now() - lastAlert) < 2 * 60 * 60 * 1000) continue;
 
-      const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: 15 });
-      const k       = Object.keys(ohlc).find(k => k !== 'last');
-      const candles = ohlc[k].slice(-25);
+      const ohlcRaw = await fetchOHLCUniversal(pair, 15);
+      const candles = ohlcRaw.slice(-25);
       const volumes = candles.map(c => parseFloat(c[6]));
       const closes  = candles.map(c => parseFloat(c[4]));
 
@@ -1069,7 +1303,9 @@ function sentimentEmoji(score) {
 }
 async function computeSignalForPair(pair) {
   try {
-    // Analyse 3 timeframes numerically
+    const sym = PAIR_DISPLAY[pair] || pair;
+
+    // ── Analyse 3 timeframes numerically ─────────────────────
     const [tf15, tf60, tf240] = await Promise.all([
       analyseTimeframe(pair, 15),
       analyseTimeframe(pair, 60),
@@ -1094,49 +1330,172 @@ async function computeSignalForPair(pair) {
       ...tf240.signals.map(s => `4h: ${s}`),
     ];
 
-    // ── Multi-Timeframe Vision Analysis ───────────────────────
-    // Renders charts at 5 timeframes and sends all to Claude Vision
-    // Weights: 15m=0.5, 1h=1, 4h=2, 1D=3, 1W=2 (longer = more reliable patterns)
-    let vision     = null;
-    let visionAll  = {}; // { '15m': analysis, '1h': analysis, ... }
+    // ══════════════════════════════════════════════════════════
+    // IMPROVEMENT 1 — MARKET REGIME DETECTION
+    // Classifies market as BULL, BEAR or SIDEWAYS using EMA200,
+    // ADX (trend strength) and ATR volatility.
+    // Different strategies apply in each regime.
+    // ══════════════════════════════════════════════════════════
+    let regime = 'UNKNOWN';
+    let regimeModifier = 1.0;
+    try {
+      const dailyCandles = await fetchOHLCUniversal(pair, 1440);
+      if (dailyCandles && dailyCandles.length >= 20) {
+        const closes = dailyCandles.map(c => parseFloat(c[4]));
+        const highs   = dailyCandles.map(c => parseFloat(c[2]));
+        const lows    = dailyCandles.map(c => parseFloat(c[3]));
+
+        // EMA 20 and EMA 50 on daily — trend direction
+        const ema20 = closes.slice(-20).reduce((s,v,_,a) => s+v/a.length, 0);
+        const ema50arr = closes.slice(-50);
+        const ema50 = ema50arr.reduce((s,v,_,a) => s+v/a.length, 0);
+        const lastPrice = closes[closes.length-1];
+
+        // ADX — trend strength (simplified: compare high-low range to ATR)
+        const recentATR = calcATR(dailyCandles.slice(-15), 14);
+        const atrPct    = recentATR?.atrPct || 2;
+
+        // Higher highs / higher lows check on last 10 candles
+        const last10closes = closes.slice(-10);
+        const higherHighs  = last10closes[9] > last10closes[5] && last10closes[5] > last10closes[0];
+        const lowerLows    = last10closes[9] < last10closes[5] && last10closes[5] < last10closes[0];
+
+        // Classify regime
+        if (lastPrice > ema20 && ema20 > ema50 && higherHighs) {
+          regime = 'BULL';
+          regimeModifier = action === 'BUY' ? 1.15 : 0.90; // boost buys, dampen sells in bull
+          allSignals.push(`📈 Market regime: BULL (price > EMA20 > EMA50, higher highs)`);
+        } else if (lastPrice < ema20 && ema20 < ema50 && lowerLows) {
+          regime = 'BEAR';
+          regimeModifier = action === 'SELL' ? 1.15 : 0.75; // boost sells, strongly dampen buys in bear
+          allSignals.push(`📉 Market regime: BEAR (price < EMA20 < EMA50, lower lows)`);
+          // In bear regime: don't buy unless extremely oversold
+          if (action === 'BUY' && tf60.rsi > 25) {
+            action = 'HOLD';
+            allSignals.push('🐻 Bear regime: suppressing BUY signal');
+          }
+        } else {
+          regime = 'SIDEWAYS';
+          // In sideways: raise confidence threshold — most signals are noise
+          regimeModifier = 0.85;
+          allSignals.push(`↔️ Market regime: SIDEWAYS (mixed signals, choppy market)`);
+          // In sideways: only act on very strong signals
+          if (confidence < 80 && action !== 'HOLD') {
+            allSignals.push('↔️ Sideways regime: signal too weak to act, holding');
+            action = 'HOLD';
+          }
+        }
+        confidence = Math.min(99, confidence * regimeModifier);
+      }
+    } catch(e) { console.warn(`[REGIME] ${sym}:`, e.message); }
+
+    // ══════════════════════════════════════════════════════════
+    // IMPROVEMENT 2 — VOLUME CONFIRMATION
+    // Buy/sell signals must be confirmed by above-average volume.
+    // A signal with no volume behind it is weak and likely to fail.
+    // Professional standard: require 1.5x average volume to act.
+    // ══════════════════════════════════════════════════════════
+    let volumeConfirmed = true; // default pass if data unavailable
+    try {
+      const recentCandles = tf60.rawCandles || [];
+      if (recentCandles.length >= 20) {
+        const volumes     = recentCandles.map(c => parseFloat(c[6]));
+        const avgVol20    = volumes.slice(-21,-1).reduce((s,v) => s+v, 0) / 20;
+        const currentVol  = volumes[volumes.length-1];
+        const volRatio    = avgVol20 > 0 ? currentVol / avgVol20 : 1;
+
+        if (volRatio >= 1.5) {
+          allSignals.push(`📊 Volume confirmed: ${volRatio.toFixed(1)}x above average`);
+          confidence = Math.min(99, confidence * 1.08); // volume confirmation boost
+          volumeConfirmed = true;
+        } else if (volRatio < 0.8 && action !== 'HOLD') {
+          allSignals.push(`⚠️ Low volume: only ${volRatio.toFixed(1)}x average — weak signal`);
+          confidence *= 0.88; // penalise low-volume signals
+          volumeConfirmed = false;
+        }
+      }
+    } catch(e) { console.warn(`[VOLUME CONFIRM] ${sym}:`, e.message); }
+
+    // ══════════════════════════════════════════════════════════
+    // IMPROVEMENT 3 — FUNDING RATE (USD perpetual pairs only)
+    // Extreme funding rates = crowded trade = reversal likely.
+    // When everyone is leveraged long, the next move is a squeeze down.
+    // When everyone is short, next move is a squeeze up.
+    // ══════════════════════════════════════════════════════════
+    try {
+      const isUSDpair = pair.endsWith('USD') || pair.endsWith('USDT');
+      if (isUSDpair) {
+        const fundingCache = fundingRateCache[pair];
+        const cacheAge     = fundingCache ? Date.now() - fundingCache.fetchedAt : Infinity;
+        let fundingRate    = fundingCache?.rate;
+
+        if (!fundingRate || cacheAge > 4 * 60 * 60 * 1000) {
+          // Fetch from Kraken futures API
+          try {
+            const res = await fetch(`https://futures.kraken.com/derivatives/api/v3/tickers`);
+            const data = await res.json();
+            const sym2 = pair.replace('USD','').replace('XBT','BTC');
+            const ticker = data.tickers?.find(t =>
+              t.symbol?.includes(sym2) && t.symbol?.includes('PI_')
+            );
+            if (ticker?.fundingRate !== undefined) {
+              fundingRate = parseFloat(ticker.fundingRate);
+              fundingRateCache[pair] = { rate: fundingRate, fetchedAt: Date.now() };
+            }
+          } catch(e) { /* funding rate unavailable — not critical */ }
+        }
+
+        if (fundingRate !== undefined && fundingRate !== null) {
+          const annualisedFunding = fundingRate * 3 * 365 * 100; // convert to annual %
+          if (fundingRate > 0.01) { // extremely positive — market very long
+            allSignals.push(`🔴 Funding extreme positive (${annualisedFunding.toFixed(0)}%/yr) — crowded long, squeeze risk`);
+            if (action === 'BUY') confidence *= 0.82; // penalise buys in crowded long
+          } else if (fundingRate < -0.005) { // negative — market very short
+            allSignals.push(`🟢 Funding negative (${annualisedFunding.toFixed(0)}%/yr) — crowded short, squeeze opportunity`);
+            if (action === 'BUY') confidence = Math.min(99, confidence * 1.12); // boost buys vs crowded short
+          } else {
+            allSignals.push(`💤 Funding neutral (${(fundingRate*100).toFixed(4)}%)`);
+          }
+        }
+      }
+    } catch(e) { /* funding rate is bonus signal, not critical */ }
+
+    // ── Multi-Timeframe Vision Analysis ──────────────────────
+    let vision    = null;
+    let visionAll = {};
 
     if (createCanvas) {
       try {
         const tfConfigs = [
-          { key:'15m', interval:15,   candles:80,  weight:0.5, label:'15-Min' },
-          { key:'1h',  interval:60,   candles:60,  weight:1.0, label:'1-Hour' },
-          { key:'4h',  interval:240,  candles:60,  weight:2.0, label:'4-Hour' },
-          { key:'1d',  interval:1440, candles:30,  weight:3.0, label:'Daily'  },
-          { key:'1w',  interval:10080,candles:20,  weight:2.0, label:'Weekly' },
+          { key:'15m', interval:15,   candles:80, weight:0.5, label:'15-Min' },
+          { key:'1h',  interval:60,   candles:60, weight:1.0, label:'1-Hour' },
+          { key:'4h',  interval:240,  candles:60, weight:2.0, label:'4-Hour' },
+          { key:'1d',  interval:1440, candles:30, weight:3.0, label:'Daily'  },
+          { key:'1w',  interval:10080,candles:20, weight:2.0, label:'Weekly' },
         ];
 
-        // Fetch and analyse all timeframes SEQUENTIALLY with delays
-        // Prevents overwhelming the Claude API with 40 simultaneous calls
         const visionResults = [];
         for (const tf of tfConfigs) {
           try {
-            // Small delay between each timeframe to avoid rate limits
             if (visionResults.length > 0) await new Promise(r => setTimeout(r, 800));
-            const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: tf.interval });
-            const k       = Object.keys(ohlc).find(k => k !== 'last');
-            if (!k) continue;
-            const candles = ohlc[k].slice(-tf.candles);
+            const ohlcRaw = await fetchOHLCUniversal(pair, tf.interval);
+            if (!ohlcRaw || ohlcRaw.length < 10) continue; // FIXED: was "const k=null; if(!k) continue" which broke vision
+            const candles = ohlcRaw.slice(-tf.candles);
             const result  = await analyseChartWithVision(pair, candles, {
-              rsi:           tf.key === '1h' ? tf60.rsi : tf.key === '4h' ? tf240.rsi : tf60.rsi,
+              rsi:           tf.key === '4h' ? tf240.rsi : tf60.rsi,
               macdTrend:     tf60.macd.trend,
               bbPosition:    tf60.bb.position,
               weightedScore: Math.round(weightedScore),
               timeframe:     tf.label,
+              regime,        // pass regime context to vision
             });
             if (result) visionResults.push({ ...tf, result, status:'fulfilled' });
           } catch(e) {
-            console.warn(`[VISION ${tf.key}] ${PAIR_DISPLAY[pair]||pair}:`, e.message);
+            console.warn(`[VISION ${tf.key}] ${sym}:`, e.message);
           }
         }
 
-        // Collect results and compute weighted vision score
-        let visionScoreSum  = 0;
-        let visionWeightSum = 0;
+        let visionScoreSum = 0, visionWeightSum = 0;
         let bullishTFs = 0, bearishTFs = 0, holdTFs = 0;
         const visionSignals = [];
 
@@ -1144,104 +1503,74 @@ async function computeSignalForPair(pair) {
           if (!r?.result) return;
           const { key, label, weight, result } = r;
           visionAll[key] = result;
-
-          // Accumulate weighted visual score (-5 to +5 per TF)
-          const tfScore = (result.visualScore - 5) * weight;
+          const tfScore  = (result.visualScore - 5) * weight;
           visionScoreSum  += tfScore;
           visionWeightSum += weight;
-
-          if (result.visionAction === 'BUY')  bullishTFs++;
-          else if (result.visionAction === 'SELL') bearishTFs++;
+          if (result.visionAction === 'BUY')       bullishTFs++;
+          else if (result.visionAction === 'SELL')  bearishTFs++;
           else holdTFs++;
-
           if (result.visualPattern !== 'No clear pattern' && result.patternStrength >= 6) {
             visionSignals.push(`👁 ${label}: ${result.visualPattern} (${result.visionAction} ${result.visionConfidence}%)`);
           }
-
-          console.log(`[VISION ${key}] ${PAIR_DISPLAY[pair]||pair}: ${result.visualPattern} → ${result.visionAction} ${result.visionConfidence}%`);
+          console.log(`[VISION ${key}] ${sym}: ${result.visualPattern} → ${result.visionAction} ${result.visionConfidence}%`);
         });
 
-        // Primary vision = 1h result (most balanced for intraday decisions)
         vision = visionAll['1h'] || visionAll['4h'] || null;
-
-        // Multi-TF consensus — what do most timeframes agree on?
         const totalTFs = bullishTFs + bearishTFs + holdTFs;
-        const avgVisionScore = visionWeightSum > 0 ? visionScoreSum / visionWeightSum : 0;
 
         if (totalTFs > 0) {
-          // Strong consensus — 3+ timeframes agree
           if (bullishTFs >= 3) {
-            confidence = Math.min(97, confidence * (1 + (bullishTFs * 0.06)));
+            confidence = Math.min(97, confidence * (1 + bullishTFs * 0.06));
             visionSignals.push(`👁 ${bullishTFs}/${totalTFs} timeframes BULLISH`);
-            if (action !== 'BUY' && bullishTFs >= 4) {
-              action = 'BUY';
-              visionSignals.push('👁 Vision consensus override → BUY');
-            }
+            if (action !== 'BUY' && bullishTFs >= 4) { action='BUY'; visionSignals.push('👁 Vision consensus → BUY'); }
           } else if (bearishTFs >= 3) {
-            confidence = Math.min(97, confidence * (1 + (bearishTFs * 0.06)));
+            confidence = Math.min(97, confidence * (1 + bearishTFs * 0.06));
             visionSignals.push(`👁 ${bearishTFs}/${totalTFs} timeframes BEARISH`);
-            if (action !== 'SELL' && bearishTFs >= 4) {
-              action = 'SELL';
-              visionSignals.push('👁 Vision consensus override → SELL');
-            }
+            if (action !== 'SELL' && bearishTFs >= 4) { action='SELL'; visionSignals.push('👁 Vision consensus → SELL'); }
           }
-
-          // Mixed signals — reduce confidence
           if (bullishTFs >= 2 && bearishTFs >= 2) {
             confidence *= 0.85;
-            visionSignals.push(`⚠️ Vision mixed: ${bullishTFs} bull vs ${bearishTFs} bear TFs`);
+            visionSignals.push(`⚠️ Vision mixed: ${bullishTFs} bull vs ${bearishTFs} bear`);
           }
-
-          // 1h confirms action — boost
           if (vision?.visionAction === action && vision?.patternStrength >= 7) {
             confidence = Math.min(97, confidence * 1.12);
           }
-
-          // Daily chart strongly disagrees — significant warning
           const dailyVision = visionAll['1d'];
           if (dailyVision?.visionAction && dailyVision.visionAction !== action &&
               dailyVision.visionAction !== 'HOLD' && dailyVision.visionConfidence >= 75) {
             confidence *= 0.80;
-            visionSignals.push(`⚠️ Daily chart disagrees: ${dailyVision.visionAction} (${dailyVision.visualPattern})`);
+            visionSignals.push(`⚠️ Daily disagrees: ${dailyVision.visionAction} (${dailyVision.visualPattern})`);
           }
         }
-
         allSignals.push(...visionSignals);
-
-      } catch(e) { console.warn('[VISION] Multi-TF failed:', e.message); }
+      } catch(e) { console.warn('[VISION]', e.message); }
     }
 
-    // ── Apply learned signal weights to confidence ────────────
-    // After enough trades, the learning engine adjusts these weights
-    // based on which signals actually predicted profitable outcomes
+    // ── Apply learned signal weights ──────────────────────────
     const activeSignals = [];
     let weightMultiplier = 1.0;
 
-    // Check which signals fired and apply their learned weights
     if (tf60.rsi < 30) { activeSignals.push('rsi_oversold');   weightMultiplier *= signalWeights.rsi_oversold; }
     if (tf60.rsi > 70) { activeSignals.push('rsi_overbought'); weightMultiplier *= signalWeights.rsi_overbought; }
-    if (tf60.macd?.trend === 'bullish') { activeSignals.push('macd_bullish'); weightMultiplier *= signalWeights.macd_bullish; }
-    if (tf60.bb?.position === 'lower')  { activeSignals.push('bb_lower');     weightMultiplier *= signalWeights.bb_lower; }
-    if (tf60.bb?.position === 'upper')  { activeSignals.push('bb_upper');     weightMultiplier *= signalWeights.bb_upper; }
+    if (tf60.macd?.trend === 'BULLISH') { activeSignals.push('macd_bullish'); weightMultiplier *= signalWeights.macd_bullish; }
+    if (tf60.bb?.position === 'OVERSOLD')  { activeSignals.push('bb_lower'); weightMultiplier *= signalWeights.bb_lower; }
+    if (tf60.bb?.position === 'OVERBOUGHT'){ activeSignals.push('bb_upper'); weightMultiplier *= signalWeights.bb_upper; }
 
-    // Pattern-based weights
-    const patternNames = [...tf60.patterns, ...tf240.patterns].map(p => p?.name?.toLowerCase() || '');
+    const patternNames = [...(tf60.patterns||[]), ...(tf240.patterns||[])].map(p => p?.name?.toLowerCase() || '');
     if (patternNames.some(n => n.includes('hammer')))    { activeSignals.push('hammer');       weightMultiplier *= signalWeights.hammer; }
     if (patternNames.some(n => n.includes('engulfing'))) { activeSignals.push('engulfing');    weightMultiplier *= signalWeights.engulfing; }
     if (patternNames.some(n => n.includes('morning')))   { activeSignals.push('morning_star'); weightMultiplier *= signalWeights.morning_star; }
 
-    // Vision-based weights
     if (vision) {
       if (vision.visionAction === action && vision.patternStrength >= 7) {
         activeSignals.push('vision_confirms');
         weightMultiplier *= signalWeights.vision_confirms;
       } else if (vision.visionAction !== action && vision.visionAction !== 'HOLD') {
         activeSignals.push('vision_disagrees');
-        weightMultiplier *= (2 - signalWeights.vision_confirms); // inverse
+        weightMultiplier *= (2 - signalWeights.vision_confirms);
       }
     }
 
-    // Multiple timeframes agree
     const tfActions = [
       tf15.score > 2 ? 'BUY' : tf15.score < -2 ? 'SELL' : 'HOLD',
       tf60.score > 2 ? 'BUY' : tf60.score < -2 ? 'SELL' : 'HOLD',
@@ -1252,42 +1581,62 @@ async function computeSignalForPair(pair) {
       weightMultiplier *= signalWeights.multi_tf_agrees;
     }
 
-    // Apply weight multiplier to confidence (capped)
-    const weightedConfidence = Math.min(99, Math.round(confidence * Math.min(weightMultiplier, 1.5)));
+    // ══════════════════════════════════════════════════════════
+    // IMPROVEMENT 4 — POSITION SIZING BY CONVICTION
+    // High confidence = bigger position. Low confidence = smaller.
+    // 65-74%: 0.5x | 75-84%: 1.0x | 85-94%: 1.25x | 95%+: 1.5x
+    // The bot passes this multiplier to the buy execution.
+    // ══════════════════════════════════════════════════════════
+    const rawConf = Math.min(99, Math.round(confidence * Math.min(weightMultiplier, 1.5)));
+    let positionSizeMultiplier = 0.5; // default: small
+    if (rawConf >= 95)      positionSizeMultiplier = 1.5;
+    else if (rawConf >= 85) positionSizeMultiplier = 1.25;
+    else if (rawConf >= 75) positionSizeMultiplier = 1.0;
+    else if (rawConf >= 65) positionSizeMultiplier = 0.5;
+    else                     positionSizeMultiplier = 0.25; // very weak — minimal size
 
-    // Store signal conditions for learning after trade closes
+    if (positionSizeMultiplier !== 1.0) {
+      allSignals.push(`💰 Position size: ${positionSizeMultiplier}x (confidence ${rawConf}%)`);
+    }
+
     const signalConditions = {
-      rsi:          tf60.rsi,
+      rsi:           tf60.rsi,
       weightedScore,
+      regime,
       activeSignals,
-      weightMultiplier: parseFloat(weightMultiplier.toFixed(3)),
-      visionAction:     vision?.visionAction || null,
-      patterns:         patternNames.filter(Boolean).slice(0,3),
+      volumeConfirmed,
+      weightMultiplier:       parseFloat(weightMultiplier.toFixed(3)),
+      positionSizeMultiplier: positionSizeMultiplier,
+      visionAction:           vision?.visionAction || null,
+      patterns:               patternNames.filter(Boolean).slice(0,3),
     };
 
     return {
       action,
-      confidence:      weightedConfidence,
-      rawConfidence:   Math.min(99, Math.round(confidence)),
+      confidence:             rawConf,
+      rawConfidence:          Math.min(99, Math.round(confidence)),
       weightedScore,
-      signals:         allSignals,
+      regime,
+      positionSizeMultiplier,
+      volumeConfirmed,
+      signals:                allSignals,
       vision,
       visionAll,
-      signalConditions, // stored with trade for learning
+      signalConditions,
       patterns: [
-        ...tf60.patterns.map(p => ({ ...p, tf:'1h' })),
-        ...tf240.patterns.map(p => ({ ...p, tf:'4h' })),
+        ...(tf60.patterns||[]).map(p => ({ ...p, tf:'1h' })),
+        ...(tf240.patterns||[]).map(p => ({ ...p, tf:'4h' })),
       ],
       timeframes: {
-        '15m': { rsi:tf15.rsi, macd:tf15.macd.trend, bb:tf15.bb.position, score:tf15.score, patterns:tf15.patterns.map(p=>p.name) },
-        '1h':  { rsi:tf60.rsi, macd:tf60.macd.trend, bb:tf60.bb.position, score:tf60.score, patterns:tf60.patterns.map(p=>p.name) },
-        '4h':  { rsi:tf240.rsi, macd:tf240.macd.trend, bb:tf240.bb.position, score:tf240.score, patterns:tf240.patterns.map(p=>p.name) },
+        '15m': { rsi:tf15.rsi, macd:tf15.macd?.trend, bb:tf15.bb?.position, score:tf15.score },
+        '1h':  { rsi:tf60.rsi, macd:tf60.macd?.trend, bb:tf60.bb?.position, score:tf60.score },
+        '4h':  { rsi:tf240.rsi, macd:tf240.macd?.trend, bb:tf240.bb?.position, score:tf240.score },
       },
       rsi: tf60.rsi,
     };
   } catch(e) {
     console.error(`[SIGNAL] Error for ${pair}:`, e.message);
-    return { action:'HOLD', confidence:0, rsi:50, signals:[], timeframes:{}, vision:null };
+    return { action:'HOLD', confidence:0, rsi:50, signals:[], timeframes:{}, vision:null, regime:'UNKNOWN', positionSizeMultiplier:0.5 };
   }
 }
 
@@ -1563,7 +1912,12 @@ async function checkBuyOpportunities(marketData) {
 
     const pairCurr     = pairCurrency(bestOpportunity.pair);
     const cashForPair  = pairCurr === 'USD' ? usdCash : audCash;
-    const suggestedAUD = Math.min(cashForPair * 0.25, cashForPair - 10);
+
+    // ── Position sizing by conviction (Improvement 4) ─────────
+    // Scale trade size based on signal confidence
+    const posMultiplier = bestOpportunity.signal?.positionSizeMultiplier || 1.0;
+    const baseSizeAUD   = Math.min(cashForPair * 0.25, cashForPair - 10);
+    const suggestedAUD  = Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40); // never more than 40% of cash
     if (suggestedAUD < 5) return;
 
     const volume   = (suggestedAUD / bestOpportunity.price).toFixed(8);
@@ -1596,6 +1950,10 @@ async function checkBuyOpportunities(marketData) {
       try {
         console.log(`[AUTO-BUY] Executing ${bestOpportunity.displayPair} — ${bestOpportunity.confidence}% confidence`);
 
+        // Calculate ATR stop for display in the buy notification
+        const atrStopInfo         = await calcDynamicStopLoss(bestOpportunity.pair, botConfig.atrMultiplier || 2.0);
+        const effectiveStopForDisplay = atrStopInfo?.stopPct || botConfig.stopLossPct;
+
         const order = await krakenPrivateRequest('AddOrder', {
           pair:      bestOpportunity.pair,
           type:      'buy',
@@ -1616,6 +1974,10 @@ async function checkBuyOpportunities(marketData) {
           `TXID: ${order.txid?.join(', ')}\n\n` +
           `Signal: RSI ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
           `${patStr}${sentStr}${visStr}\n\n` +
+          `📊 <b>Stop Protection Map:</b>\n` +
+          `🔴 Stop loss fires if: -${effectiveStopForDisplay}% from entry\n` +
+          `🟡 Break-even stop activates at: +${botConfig.breakEvenTriggerPct}% (stop moves to entry)\n` +
+          `🟢 Trailing stop activates at: +${botConfig.trailingTriggerPct}% (locks in profit)\n\n` +
           `⏱ Min hold: ${botConfig.minHoldMinutes} min\n` +
           `🔴 To disable auto-buy, go to Bot Settings → Auto-Buy\n` +
           `⏰ ${sydneyTime} AEST`
@@ -1810,9 +2172,9 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       // Send each chart as a separate photo with its own caption
       for (const tf of tfConfigs) {
         try {
-          const ohlc    = await krakenPublicRequest('OHLC', { pair, interval: tf.interval });
-          const k       = Object.keys(ohlc).find(k => k !== 'last');
-          const candles = ohlc[k].slice(-tf.candles);
+          const ohlcRaw = await fetchOHLCUniversal(pair, tf.interval);
+          const k = null;
+          const candles = ohlcRaw.slice(-tf.candles);
           const buf     = renderChartToBuffer(candles, 600, 300);
           if (!buf) continue;
 
@@ -1958,7 +2320,14 @@ async function handleTelegramMessage(chatId, userMessage, username) {
 
       // ── Record buy immediately for P&L and hold time ──────
       recordTrade(opp.pair, opp.sym, 'buy', freshVolume, freshPrice, 'manual-yes');
-      lastBuyTimes[opp.sym] = Date.now(); // enforce minimum hold time from now
+      lastBuyTimes[opp.sym] = Date.now();
+
+      // Calculate ATR stop for display
+      const atrStopDisplay      = await calcDynamicStopLoss(opp.pair, botConfig.atrMultiplier || 2.0);
+      const stopDisplayPct      = atrStopDisplay?.stopPct || botConfig.stopLossPct;
+      const stopPriceDisplay    = freshPrice * (1 - stopDisplayPct / 100);
+      const breakEvenDisplay    = freshPrice * (1 + botConfig.breakEvenTriggerPct / 100);
+      const trailingDisplay     = freshPrice * (1 + botConfig.trailingTriggerPct / 100);
 
       const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
       await sendTelegramTo(chatId,
@@ -1967,9 +2336,12 @@ async function handleTelegramMessage(chatId, userMessage, username) {
         `Bought: ${freshVolume} ${opp.sym}\n` +
         `Price: ${fmtAUDServer(freshPrice)}\n` +
         `Total: ≈ ${fmtAUDServer(parseFloat(valueAUD))}\n` +
-        `TXID: ${order.txid?.join(', ')}\n` +
-        `⏱ Min hold: ${botConfig.minHoldMinutes} minutes\n\n` +
-        `⏰ ${sydneyTime} AEST\n\nGood luck! 🚀`
+        `TXID: ${order.txid?.join(', ')}\n\n` +
+        `📊 <b>Your Stop Protection:</b>\n` +
+        `🔴 Stop loss: ${fmtAUDServer(stopPriceDisplay)} (-${stopDisplayPct}%)\n` +
+        `🟡 Break-even at: ${fmtAUDServer(breakEvenDisplay)} (+${botConfig.breakEvenTriggerPct}%) → stop moves to entry\n` +
+        `🟢 Trailing stop at: ${fmtAUDServer(trailingDisplay)} (+${botConfig.trailingTriggerPct}%) → locks in profit\n\n` +
+        `⏱ Min hold: ${botConfig.minHoldMinutes} min · ⏰ ${sydneyTime} AEST`
       );
     } catch(orderErr) {
       await sendTelegramTo(chatId,
@@ -3684,7 +4056,139 @@ app.post('/api/performance/report', requireAuth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-// WAITLIST — Captures signups from landing page
+// ALPACA — US STOCK TRADING ROUTES
+// ══════════════════════════════════════════════════════════════
+
+// Account info
+app.get('/api/alpaca/account', requireAuth, async (req, res) => {
+  try {
+    const account = await getAlpacaAccount();
+    res.json({ success:true, data:{
+      buyingPower:  parseFloat(account.buying_power),
+      cash:         parseFloat(account.cash),
+      equity:       parseFloat(account.equity),
+      portfolioValue: parseFloat(account.portfolio_value),
+      currency:     account.currency,
+      status:       account.status,
+      paperTrading: ALPACA_PAPER,
+    }});
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stock positions
+app.get('/api/alpaca/positions', requireAuth, async (req, res) => {
+  try {
+    const positions = await getAlpacaPositions();
+    const mapped    = positions.map(p => ({
+      symbol:     p.symbol,
+      qty:        parseFloat(p.qty),
+      avgEntry:   parseFloat(p.avg_entry_price),
+      currentPrice: parseFloat(p.current_price),
+      marketValue:  parseFloat(p.market_value),
+      unrealisedPnl: parseFloat(p.unrealized_pl),
+      unrealisedPct: parseFloat(p.unrealized_plpc) * 100,
+      side:       p.side,
+    }));
+    res.json({ success:true, data: mapped });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stock quote
+app.get('/api/alpaca/quote/:symbol', requireAuth, async (req, res) => {
+  try {
+    const ticker = await fetchStockTicker(req.params.symbol.toUpperCase());
+    if (!ticker) return res.status(404).json({ error: 'Symbol not found' });
+    res.json({ success:true, data: ticker });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stock bars (OHLC)
+app.get('/api/alpaca/bars/:symbol', requireAuth, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const tf     = req.query.timeframe || '1Hour';
+    const limit  = parseInt(req.query.limit) || 60;
+    const bars   = await fetchStockBars(symbol, tf, limit);
+    res.json({ success:true, data: bars, symbol });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Place stock order
+app.post('/api/alpaca/order', requireAuth, requireKeys, async (req, res) => {
+  try {
+    const { symbol, side, qty, orderType, limitPrice } = req.body;
+    if (!symbol || !side || !qty) return res.status(400).json({ error: 'symbol, side and qty required' });
+
+    const sym = symbol.toUpperCase();
+    if (!ALPACA_KEY) return res.status(503).json({ error: 'Alpaca not configured — add ALPACA_API_KEY and ALPACA_API_SECRET to Railway' });
+
+    const order  = await placeStockOrder(sym, side, qty, orderType || 'market', limitPrice);
+    const ticker = await fetchStockTicker(sym);
+
+    recordTrade(
+      sym, sym, side,
+      parseFloat(qty), ticker?.price || 0,
+      'alpaca-manual', null
+    );
+
+    await sendTelegram(
+      `${side === 'buy' ? '🟢' : '🔴'} <b>STOCK ${side.toUpperCase()} — ${sym}</b>\n\n` +
+      `Qty: ${qty} shares\n` +
+      `Price: US$${ticker?.price?.toFixed(2) || '?'}\n` +
+      `Value: ≈ US$${(qty * (ticker?.price||0)).toFixed(2)}\n` +
+      `Order ID: ${order.id}\n` +
+      `Status: ${order.status}\n` +
+      `${ALPACA_PAPER ? '📝 PAPER TRADE' : '💰 LIVE TRADE'}`
+    );
+
+    res.json({ success:true, data: order });
+  } catch(e) {
+    await sendTelegram(`❌ Stock order failed: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get all US stock signals
+app.get('/api/alpaca/signals', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error: 'Alpaca not configured' });
+    const symbols  = (req.query.symbols || US_STOCKS.slice(0,8).join(',')).split(',');
+    const results  = [];
+    for (const sym of symbols) {
+      try {
+        const signal = await computeSignalForPair(sym);
+        const ticker = await fetchStockTicker(sym);
+        results.push({ symbol:sym, ...signal, price: ticker?.price, change24h: ticker?.change24h });
+        await new Promise(r => setTimeout(r, 500));
+      } catch(e) { console.warn(`[STOCK SIGNAL] ${sym}:`, e.message); }
+    }
+    res.json({ success:true, data: results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Search for any stock symbol
+app.get('/api/alpaca/search', requireAuth, async (req, res) => {
+  try {
+    const q    = req.query.q;
+    if (!q) return res.status(400).json({ error: 'q required' });
+    const data = await alpacaRequest(`/assets?asset_class=us_equity&status=active`, 'GET', null, false);
+    const matches = data
+      .filter(a => a.symbol.toUpperCase().includes(q.toUpperCase()) || a.name?.toUpperCase().includes(q.toUpperCase()))
+      .slice(0, 20)
+      .map(a => ({ symbol: a.symbol, name: a.name, exchange: a.exchange, tradable: a.tradable }));
+    res.json({ success:true, data: matches });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Alpaca configured check
+app.get('/api/alpaca/status', requireAuth, (req, res) => {
+  res.json({
+    success:     true,
+    configured:  !!(ALPACA_KEY && ALPACA_SECRET),
+    paperTrading: ALPACA_PAPER,
+    stocks:      US_STOCKS,
+  });
+});
 // Stores locally + optionally sends to Mailchimp
 // ══════════════════════════════════════════════════════════════
 
@@ -3843,6 +4347,18 @@ app.post('/api/signal/full', requireAuth, async (req, res) => {
 // AUTO-SELL BOT ROUTES
 // ═══════════════════════════════════════════════════════════════
 app.get('/api/bot/config',  requireAuth, (req, res) => res.json({ success:true, data:{ ...botConfig, state:botState } }));
+// ATR stop loss info for current holdings
+app.get('/api/atr/:pair', requireAuth, async (req, res) => {
+  try {
+    const pair   = req.params.pair;
+    const mult   = parseFloat(req.query.multiplier) || botConfig.atrMultiplier || 2.0;
+    const result = await calcDynamicStopLoss(pair, mult);
+    if (!result) return res.json({ success:false, error:'Not enough candle data yet' });
+    res.json({ success:true, data: result });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update ATR multiplier via bot config
 app.post('/api/bot/config', requireAuth, (req, res) => {
   botConfig = { ...botConfig, ...req.body };
   saveData(); // persist immediately
@@ -3923,62 +4439,148 @@ async function runAutoSellCheck() {
       }
 
       // ── Minimum Hold Time Check ───────────────────────────
-      // Never sell within minHoldMinutes of buying — prevents churn on noise
-      const lastBought = lastBuyTimes[holding.sym];
+      // Don't sell within minHoldMinutes of buying — prevents churn on noise
+      // EXCEPTION: If we're down >5% we allow stop loss to fire anyway
+      const lastBought  = lastBuyTimes[holding.sym];
+      const pnlEarly    = getUnrealisedPnl(holding.sym, ticker.price, holding.qty);
+      const earlyLossPct = pnlEarly.avgBuyPrice > 0
+        ? ((ticker.price - pnlEarly.avgBuyPrice) / pnlEarly.avgBuyPrice) * 100
+        : 0;
       if (lastBought) {
         const heldMinutes = (Date.now() - lastBought) / 1000 / 60;
-        if (heldMinutes < botConfig.minHoldMinutes) {
+        if (heldMinutes < botConfig.minHoldMinutes && earlyLossPct > -5) {
           console.log(`[AUTO-SELL BOT] ${dp} — hold time enforced (${heldMinutes.toFixed(0)}/${botConfig.minHoldMinutes} min)`);
           continue;
         }
+        if (heldMinutes < botConfig.minHoldMinutes && earlyLossPct <= -5) {
+          console.log(`[AUTO-SELL BOT] ${dp} — hold time bypassed (emergency: ${earlyLossPct.toFixed(1)}% loss)`);
+        }
       }
 
-      // ── Stop-Loss Check ───────────────────────────────────
+      // ── Stop-Loss Check (ATR-powered dynamic stops) ──────────
       const pnl = getUnrealisedPnl(holding.sym, ticker.price, holding.qty);
       if (botConfig.stopLossEnabled && pnl.avgBuyPrice > 0) {
 
-        // Trailing stop — track highest price since buy
-        if (botConfig.trailingStop) {
-          if (!stopLossPeaks[holding.sym] || ticker.price > stopLossPeaks[holding.sym]) {
-            stopLossPeaks[holding.sym] = ticker.price;
-          }
-          const peakPrice  = stopLossPeaks[holding.sym];
-          const dropFromPeak = ((ticker.price - peakPrice) / peakPrice) * 100;
-          if (dropFromPeak <= -botConfig.stopLossPct) {
-            console.log(`[TRAILING STOP] ${dp} triggered — dropped ${dropFromPeak.toFixed(1)}% from peak ${fmtAUDServer(peakPrice)}`);
-            await sendTelegram(
-              `🛑 <b>TRAILING STOP-LOSS TRIGGERED!</b>\n\n` +
-              `<b>${dp}</b>\n` +
-              `Current: ${fmtAUDServer(ticker.price)}\n` +
-              `Peak since buy: ${fmtAUDServer(peakPrice)}\n` +
-              `Drop from peak: <b>${dropFromPeak.toFixed(1)}%</b> (limit: -${botConfig.stopLossPct}%)\n` +
-              `P&L: ${pnl.unrealisedPnl >= 0 ? '🟢 +' : '🔴 '}${fmtAUDServer(pnl.unrealisedPnl)}\n\n` +
-              `⏳ Selling to lock in ${pnl.unrealisedPnl >= 0 ? 'profit' : 'and cut loss'}...`
-            );
-            delete stopLossPeaks[holding.sym]; // reset peak
-            await executeSell(holding, ticker, 'trailing-stop', `Trailing stop: -${dropFromPeak.toFixed(1)}% from peak`, dp);
-            continue;
-          }
-        } else {
-          // Standard stop-loss — drop from avg buy
-          const dropPct = ((ticker.price - pnl.avgBuyPrice) / pnl.avgBuyPrice) * 100;
-          if (dropPct <= -botConfig.stopLossPct) {
-            console.log(`[STOP-LOSS] ${dp} triggered — dropped ${dropPct.toFixed(1)}% from avg buy ${fmtAUDServer(pnl.avgBuyPrice)}`);
-            const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
-            await sendTelegram(
-              `🛑 <b>STOP-LOSS TRIGGERED!</b>\n\n` +
-              `<b>${dp}</b>\n` +
-              `Current price: ${fmtAUDServer(ticker.price)}\n` +
-              `Avg buy price: ${fmtAUDServer(pnl.avgBuyPrice)}\n` +
-              `Drop: <b>${dropPct.toFixed(1)}%</b> (limit: -${botConfig.stopLossPct}%)\n` +
-              `Unrealised loss: ${fmtAUDServer(pnl.unrealisedPnl)}\n\n` +
-              `⏳ Selling full holding to protect capital...`
-            );
-            await executeSell(holding, ticker, 'stop-loss', `Stop-loss at ${dropPct.toFixed(1)}% drop`, dp);
-            continue;
+        // Calculate ATR-based dynamic stop for this coin right now
+        // Falls back to botConfig.stopLossPct if ATR unavailable
+        let effectiveStopPct = botConfig.stopLossPct;
+        if (botConfig.useATRStops !== false) {
+          const atrStop = await calcDynamicStopLoss(holding.pair, botConfig.atrMultiplier || 2.0);
+          if (atrStop) {
+            effectiveStopPct = atrStop.stopPct;
+            if (Math.abs(effectiveStopPct - botConfig.stopLossPct) > 1) {
+              console.log(`[ATR STOP] ${dp} using ATR stop ${effectiveStopPct}% (ATR=${atrStop.atrPct}%)`);
+            }
           }
         }
-      }
+
+        // Track peak price for trailing stop
+        if (!stopLossPeaks[holding.sym] || ticker.price > stopLossPeaks[holding.sym]) {
+          stopLossPeaks[holding.sym] = ticker.price;
+        }
+        const peakPrice    = stopLossPeaks[holding.sym];
+        const entryPrice   = pnl.avgBuyPrice;
+        const currentPrice = ticker.price;
+        const gainFromEntry   = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+        const dropFromPeak    = ((currentPrice - peakPrice) / peakPrice) * 100;
+        const dropFromEntry   = gainFromEntry; // negative = below entry
+
+        // ══════════════════════════════════════════════════════
+        // BREAK-EVEN STOP SYSTEM
+        // Three progressive stages that protect profit:
+        //
+        // STAGE 1 — DANGER ZONE (below entry)
+        //   Standard ATR stop loss. If price drops too far below
+        //   entry, cut the loss immediately.
+        //
+        // STAGE 2 — BREAK-EVEN ZONE (0% to +breakEvenTrigger%)
+        //   Once price moves up, the "virtual stop" is entry price.
+        //   If it reverses back below entry we sell at break-even.
+        //   You never lose money on a trade that was in profit.
+        //
+        // STAGE 3 — PROFIT PROTECTION ZONE (above +breakEvenTrigger%)
+        //   Trailing stop activates. Trails below the peak by ATR%.
+        //   Locks in profit as price rises. If it reverses by ATR%
+        //   from the peak, we sell and bank the gain.
+        // ══════════════════════════════════════════════════════
+
+        const breakEvenTrigger = botConfig.breakEvenTriggerPct || 2.0; // move stop to entry after +2%
+        const trailingTrigger  = botConfig.trailingTriggerPct  || 4.0; // activate trailing stop after +4%
+
+        if (entryPrice > 0) {
+
+          if (gainFromEntry >= trailingTrigger) {
+            // ── STAGE 3: Profit protection — trailing stop ──────
+            if (dropFromPeak <= -effectiveStopPct) {
+              const profitLocked = ((currentPrice - entryPrice) / entryPrice) * 100;
+              console.log(`[TRAILING STOP] ${dp} triggered — ${dropFromPeak.toFixed(1)}% from peak, locking in +${profitLocked.toFixed(1)}%`);
+              await sendTelegram(
+                `🔒 <b>PROFIT LOCKED IN!</b>\n\n` +
+                `<b>${dp}</b>\n` +
+                `Entry: ${fmtAUDServer(entryPrice, holding.pair)}\n` +
+                `Peak: ${fmtAUDServer(peakPrice, holding.pair)}\n` +
+                `Exit: ${fmtAUDServer(currentPrice, holding.pair)}\n` +
+                `Drop from peak: ${dropFromPeak.toFixed(1)}% (ATR limit: -${effectiveStopPct}%)\n\n` +
+                `💰 <b>Net gain on this trade: +${profitLocked.toFixed(2)}%</b>\n` +
+                `💵 ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)} profit banked\n\n` +
+                `✅ Break-even stop protected you from giving this back`
+              );
+              delete stopLossPeaks[holding.sym];
+              await executeSell(holding, ticker, 'trailing-stop', `Trailing stop: locked in +${profitLocked.toFixed(1)}%`, dp);
+              continue;
+            } else {
+              console.log(`[STAGE 3] ${dp} profit zone — peak ${fmtAUDServer(peakPrice, holding.pair)}, trailing ${effectiveStopPct}% below`);
+            }
+
+          } else if (gainFromEntry >= breakEvenTrigger) {
+            // ── STAGE 2: Break-even zone — stop moved to entry ──
+            // Price is up +2% to +4% from entry.
+            // If it reverses back below entry + small buffer, sell at break-even.
+            const breakEvenBuffer = 0.3; // tiny buffer for fees
+            const breakEvenStop   = entryPrice * (1 - breakEvenBuffer / 100);
+
+            if (currentPrice <= breakEvenStop) {
+              console.log(`[BREAK-EVEN STOP] ${dp} triggered — price fell back to entry after being +${gainFromEntry.toFixed(1)}%`);
+              await sendTelegram(
+                `🔄 <b>BREAK-EVEN STOP TRIGGERED</b>\n\n` +
+                `<b>${dp}</b>\n` +
+                `Entry: ${fmtAUDServer(entryPrice, holding.pair)}\n` +
+                `Exit: ${fmtAUDServer(currentPrice, holding.pair)}\n` +
+                `Peak reached: ${fmtAUDServer(peakPrice, holding.pair)} (+${gainFromEntry.toFixed(1)}%)\n\n` +
+                `✅ Stop moved to entry protected your capital\n` +
+                `💡 You did not lose money on this trade`
+              );
+              delete stopLossPeaks[holding.sym];
+              await executeSell(holding, ticker, 'break-even', `Break-even stop — was +${gainFromEntry.toFixed(1)}%, returned to entry`, dp);
+              continue;
+            } else {
+              console.log(`[STAGE 2] ${dp} break-even zone +${gainFromEntry.toFixed(1)}% — stop at entry ${fmtAUDServer(entryPrice, holding.pair)}`);
+            }
+
+          } else if (gainFromEntry < 0) {
+            // ── STAGE 1: Danger zone — below entry ─────────────
+            // Standard ATR stop. If dropping too far, cut the loss.
+            if (dropFromEntry <= -effectiveStopPct) {
+              console.log(`[STOP-LOSS] ${dp} triggered — ${dropFromEntry.toFixed(1)}% below entry`);
+              await sendTelegram(
+                `🛑 <b>STOP-LOSS TRIGGERED</b>\n\n` +
+                `<b>${dp}</b>\n` +
+                `Entry: ${fmtAUDServer(entryPrice, holding.pair)}\n` +
+                `Current: ${fmtAUDServer(currentPrice, holding.pair)}\n` +
+                `Loss: <b>${dropFromEntry.toFixed(1)}%</b> (ATR limit: -${effectiveStopPct}%)\n` +
+                `Unrealised: ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)}\n\n` +
+                `⏳ Cutting loss to protect remaining capital...`
+              );
+              delete stopLossPeaks[holding.sym];
+              await executeSell(holding, ticker, 'stop-loss', `ATR stop: ${dropFromEntry.toFixed(1)}% below entry`, dp);
+              continue;
+            } else {
+              console.log(`[STAGE 1] ${dp} below entry ${dropFromEntry.toFixed(1)}% — stop at -${effectiveStopPct}%`);
+            }
+          }
+          // If gainFromEntry is between 0% and +2%: watching, no action yet
+        }
+      } // end stopLossEnabled
 
       // ── Multi-Indicator Signal ────────────────────────────
       const signal = await computeSignalForPair(holding.pair);
@@ -4537,7 +5139,7 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
 
     // Fetch enough candles — 30 days * 24 hrs = 720 candles
     const ohlc    = await krakenPublicRequest('OHLC', { pair, interval });
-    const k       = Object.keys(ohlc).find(k => k !== 'last');
+    const k = null;
     const allCandles = ohlc[k];
 
     // Limit to requested days
