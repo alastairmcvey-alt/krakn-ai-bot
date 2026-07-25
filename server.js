@@ -92,12 +92,7 @@ const PAIR_DISPLAY = {
 };
 
 // Which pairs to actively watch — controlled by user currency setting
-// Default is AUD only, user can switch to USD or BOTH in settings
-function getActivePairs(mode) {
-  if (mode === 'USD')  return USD_PAIRS;
-  if (mode === 'BOTH') return [...AUD_PAIRS, ...USD_PAIRS];
-  return AUD_PAIRS; // default
-}
+// Full version with STOCKS and ALL is defined below after US_STOCKS is declared
 
 // ─── Alpaca — US Stocks ────────────────────────────────────────
 const ALPACA_KEY      = (process.env.ALPACA_API_KEY    || '').trim();
@@ -127,6 +122,15 @@ US_STOCKS.forEach(s => {
 // Detect if a symbol is a US stock (not a crypto pair)
 function isStockSymbol(sym) {
   return US_STOCKS.includes(sym) || (sym && !sym.includes('USD') && !sym.includes('AUD') && sym.length <= 5 && sym === sym.toUpperCase() && !/[0-9]/.test(sym));
+}
+
+// Detect base currency from pair name
+function pairCurrency(pair) {
+  if (!pair) return 'AUD';
+  if (isStockSymbol(pair))               return 'USD'; // US stocks trade in USD
+  if (pair.endsWith('AUD'))              return 'AUD';
+  if (pair.endsWith('USD') || pair.endsWith('USDT')) return 'USD';
+  return 'AUD'; // default
 }
 
 // Updated active pairs — includes stocks when mode is STOCKS or ALL
@@ -1302,7 +1306,7 @@ async function checkVolumeAnomalies() {
 
       queueNotification('volumeAlerts',
         `VOLUME ANOMALY — ${dp}`,
-        `Volume is <b>${anomaly.ratio}x</b> above normal (${anomaly.level})\nPrice: ${fmtAUDServer(price)} — ${priceDir}${patternStr}`
+        `Volume is <b>${anomaly.ratio}x</b> above normal (${anomaly.level})\nPrice: ${fmtAUDServer(price, pair)} — ${priceDir}${patternStr}`
       );
       console.log(`[VOLUME ANOMALY] ${dp} — ${anomaly.ratio}x normal volume`);
     } catch(e) { /* silent — don't crash loop */ }
@@ -1969,19 +1973,20 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
 
         if (!bestOpportunity || oppScore > bestOpportunity.oppScore) {
           bestOpportunity = {
-            pair:         d.pair,
-            displayPair:  d.displayPair || PAIR_DISPLAY[d.pair] || d.pair,
+            pair:          d.pair,
+            displayPair:   d.displayPair || PAIR_DISPLAY[d.pair] || d.pair,
             sym,
-            price:        ticker.price,
-            change24h:    ticker.change24h,
-            high:         ticker.high,
-            low:          ticker.low,
-            rsi:          signal.rsi,
-            confidence:   signal.confidence,
+            price:         ticker.price,
+            change24h:     ticker.change24h,
+            high:          ticker.high,
+            low:           ticker.low,
+            rsi:           signal.rsi,
+            confidence:    signal.confidence,
             weightedScore: signal.weightedScore,
-            patterns:     signal.patterns || [],
+            patterns:      signal.patterns || [],
             sentiment,
             oppScore,
+            signal,  // store full signal object for positionSizeMultiplier, vision etc
           };
         }
       } catch(e) { console.warn(`[BUY CHECK] Error checking ${d.pair}:`, e.message); }
@@ -2344,6 +2349,11 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       for (const pair of scanPairs) {
         try {
           const signal  = await computeSignalForPair(pair);
+          // Guard against null/broken signal
+          if (!signal || !signal.action) {
+            results.push(`⚠️ <b>${PAIR_DISPLAY[pair]||pair}</b> — signal unavailable`);
+            continue;
+          }
           await new Promise(r => setTimeout(r, 500)); // stagger
           const ticker  = await fetchSingleTicker(pair);
           const dp      = PAIR_DISPLAY[pair] || pair;
