@@ -329,9 +329,9 @@ const MIN_VOLUMES = {
 // ─── Advisor Settings ──────────────────────────────────────────
 let advisorSettings = {
   enabled:       true,
-  intervalHours: 1,
-  pairs:         ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','LINKAUD'],
-  minConfidence: 65,
+  intervalHours: 4,   // Changed from 1h to 4h — reduces Claude API calls by 75%
+  pairs:         ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD'],  // reduced from 7 to 5 pairs
+  minConfidence: 70,  // raised from 65 to reduce noise
   includeNews:   true,
   lastRun:       null,
 };
@@ -457,25 +457,61 @@ function getUnrealisedPnl(sym, currentPrice, currentQty) {
 }
 
 // ─── Bot Config & State ────────────────────────────────────────
-// MUST be declared before loadData() so settings can be restored on startup
 let botConfig = {
-  riskLevel:          'conservative',
-  sellPct:            100,
-  confidenceMin:      75,
-  checkInterval:      60,
-  minHoldingValueAUD: 50,
-  stopLossEnabled:    true,
-  stopLossPct:        3,       // fallback if ATR unavailable
-  trailingStop:       true,
-  useATRStops:        true,    // dynamic ATR-based stop losses
-  atrMultiplier:      2.0,     // 2x ATR = professional standard for crypto
-  breakEvenTriggerPct: 2.0,   // move stop to entry price once up +2%
-  trailingTriggerPct:  4.0,   // activate trailing stop once up +4%
-  minHoldMinutes:     60,
-  currencyMode:       'AUD',
-  autoBuy:            false,   // when true — bot buys automatically without YES/NO prompt
-  autoBuyMaxAUD:      200,     // maximum AUD per auto-buy trade
-  autoBuyMinConfidence: 82,    // higher threshold for auto-buy (must be very confident)
+  riskLevel:            'conservative',
+  sellPct:              100,
+  confidenceMin:        75,
+  checkInterval:        60,
+  minHoldingValueAUD:   50,
+  stopLossEnabled:      true,
+  stopLossPct:          3,
+  trailingStop:         true,
+  useATRStops:          true,
+  atrMultiplier:        2.0,
+  breakEvenTriggerPct:  2.0,
+  trailingTriggerPct:   4.0,
+  minHoldMinutes:       60,
+  currencyMode:         'AUD',
+  autoBuy:              false,
+  autoBuyMaxAUD:        200,
+  autoBuyMinConfidence: 82,
+
+  // ── Notification Settings ─────────────────────────────────
+  // Critical alerts always fire immediately (buy/sell/stop loss/errors)
+  // Everything else respects the digest interval below
+  notifications: {
+    // Always on — these fire immediately no matter what
+    buys:          true,   // BUY signals and auto-buy executions
+    sells:         true,   // SELL executions and stop losses
+    errors:        true,   // order failures and critical errors
+    breakEven:     true,   // break-even stop triggered
+    profitLocked:  true,   // trailing stop / profit locked in
+
+    // Digest alerts — batched and sent at the interval below
+    // Options: 'off' | '4h' | '8h' | 'daily'
+    volumeAlerts:  '4h',   // volume anomaly alerts
+    smartMoney:    '8h',   // smart money wallet activity
+    macroEvents:   '4h',   // upcoming economic events
+    advisor:       'daily',// AI advisor market analysis
+    learning:      'daily',// learning engine weight updates
+    waitlist:      '8h',   // new waitlist signups
+    gridUpdates:   'off',  // grid trading order fills
+    rebalance:     'daily',// portfolio rebalance alerts
+  },
+
+  // ── API Cost Controls ─────────────────────────────────────
+  api: {
+    visionEnabled:          true,   // Claude vision chart analysis (most expensive)
+    visionMaxPairsPerCheck: 3,      // max coins to run vision on per advisor cycle
+    sentimentEnabled:       true,   // Claude sentiment analysis
+    sentimentCacheMins:     240,    // cache sentiment for 4 hours (was 2 hours)
+    advisorEnabled:         true,   // AI advisor runs
+    advisorIntervalHours:   4,      // how often advisor runs (was 1 hour)
+    onChainEnabled:         true,   // on-chain data fetches
+    onChainCacheHours:      4,      // cache on-chain data (was 2 hours)
+    learningEnabled:        true,   // learning engine
+    learningMinTrades:      10,     // min trades before learning (was 5)
+  },
 };
 
 // Track when each coin was last bought so we enforce minimum hold time
@@ -487,6 +523,51 @@ let botState = {
   sellsCount:  0,
   lastCheck:   null,
 };
+
+// ─── Notification Digest System ───────────────────────────────
+// Non-critical alerts queue here and flush at user-configured intervals
+// Critical alerts (buys/sells/stop losses) always fire immediately
+const digestQueue    = {}; // { category: [{ title, body }] }
+const digestLastSent = {}; // { category: lastSentTimestamp }
+
+function queueNotification(category, title, body) {
+  const setting = botConfig.notifications?.[category];
+  if (!setting || setting === 'off') return;
+  if (!digestQueue[category]) digestQueue[category] = [];
+  digestQueue[category].push({ title, body, timestamp: new Date().toISOString() });
+  console.log(`[NOTIFY QUEUE] ${category}: ${title}`);
+}
+
+function intervalToMs(setting) {
+  if (setting === '4h')    return 4  * 60 * 60 * 1000;
+  if (setting === '8h')    return 8  * 60 * 60 * 1000;
+  if (setting === 'daily') return 24 * 60 * 60 * 1000;
+  return null;
+}
+
+async function flushDigestQueues() {
+  const settings = botConfig.notifications || {};
+  for (const [category, items] of Object.entries(digestQueue)) {
+    if (!items?.length) continue;
+    const interval = intervalToMs(settings[category]);
+    if (!interval) continue;
+    if (Date.now() - (digestLastSent[category] || 0) < interval) continue;
+
+    const label  = settings[category] === 'daily' ? 'Daily' :
+                   settings[category] === '8h' ? '8-Hour' : '4-Hour';
+    const lines  = items.slice(-8).map((n,i) =>
+      `${i+1}. <b>${n.title}</b>\n${n.body}`
+    ).join('\n\n');
+
+    await sendTelegram(
+      `📋 <b>${label} Digest — ${category.replace(/([A-Z])/g,' $1').trim()}</b>\n` +
+      `${items.length} update${items.length!==1?'s':''}\n\n${lines}`
+    );
+    digestQueue[category]    = [];
+    digestLastSent[category] = Date.now();
+  }
+}
+setInterval(flushDigestQueues, 30 * 60 * 1000); // check every 30 mins
 
 // ─── Portfolio History ─────────────────────────────────────────
 let portfolioHistory = []; // [{ date, valueAUD, timestamp }]
@@ -1219,14 +1300,10 @@ async function checkVolumeAnomalies() {
 
       volumeAnomalyCache[pair] = Date.now();
 
-      await sendTelegram(
-        `${anomaly.emoji} <b>VOLUME ANOMALY — ${dp}</b>\n\n` +
-        `Volume is <b>${anomaly.ratio}x</b> above normal (${anomaly.level})\n` +
-        `Price: ${fmtAUDServer(price)} — ${priceDir}` +
-        `${patternStr}\n\n` +
-        `⚠️ Big move may be coming. Check your position.`
+      queueNotification('volumeAlerts',
+        `VOLUME ANOMALY — ${dp}`,
+        `Volume is <b>${anomaly.ratio}x</b> above normal (${anomaly.level})\nPrice: ${fmtAUDServer(price)} — ${priceDir}${patternStr}`
       );
-
       console.log(`[VOLUME ANOMALY] ${dp} — ${anomaly.ratio}x normal volume`);
     } catch(e) { /* silent — don't crash loop */ }
   }
@@ -1806,8 +1883,16 @@ Only include coins above ${advisorSettings.minConfidence}% confidence. If none q
 
     const advice = await callClaude(prompt, 900);
     if (advice) {
-      await sendTelegram(advice);
-      console.log('[ADVISOR] Telegram sent');
+      // Check if advisor notification is set to immediate or digest
+      const advSetting = botConfig.notifications?.advisor;
+      if (!advSetting || advSetting === 'off') {
+        console.log('[ADVISOR] Notifications off — skipping Telegram');
+      } else if (advSetting === '4h' || advSetting === '8h' || advSetting === 'daily') {
+        queueNotification('advisor', 'AI Market Analysis', advice.replace(/<[^>]*>/g, '').slice(0, 300));
+      } else {
+        await sendTelegram(advice); // immediate (legacy default)
+      }
+      console.log('[ADVISOR] Analysis complete');
     }
 
     if (advisorSettings.intervalHours <= 1) {
@@ -3228,7 +3313,16 @@ async function checkSmartMoneySignals() {
         `Urgency: ${interpretation.urgency} | ${freshTxs.length} transactions in last 2h\n` +
         `⏰ ${new Date().toLocaleString('en-AU', {timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short'})} AEST`;
 
-      await sendTelegram(msg);
+      // HIGH urgency smart money always fires immediately (potential trade opportunity)
+      // MEDIUM and LOW go to digest queue
+      if (interpretation.urgency === 'HIGH') {
+        await sendTelegram(msg);
+      } else {
+        queueNotification('smartMoney',
+          `${wallet.label}: ${interpretation.action} ${interpretation.coin}`,
+          `Confidence: ${interpretation.confidence}% | ${interpretation.urgency} urgency\n${interpretation.reasoning?.slice(0,100)}`
+        );
+      }
 
       // Log the alert
       smartMoneyAlertLog.unshift({
@@ -3380,14 +3474,10 @@ Only include signals with 5+ occurrences. Weight range: 0.3-2.0. Max change 0.3 
     console.log(`[LEARNING] ✅ ${changesApplied} changes applied — ${learning.keyInsight}`);
 
     if (changesApplied > 0) {
-      await sendTelegram(
-        `🧠 <b>Bot Learning Update</b>\n\n` +
-        `Analysed ${tradeOutcomes.length} trades\n` +
-        `Win rate: ${(winRate*100).toFixed(1)}% | Avg P&L: ${avgPnl.toFixed(2)}%\n\n` +
-        `<b>Key insight:</b> ${learning.keyInsight}\n` +
-        `<b>Winning signals:</b> ${learning.winningPattern}\n` +
-        `<b>Losing signals:</b> ${learning.losingPattern}\n\n` +
-        `${changesApplied} signal weights adjusted 🎯`
+      queueNotification('learning',
+        `Learning Update: ${changesApplied} weights adjusted`,
+        `Win rate: ${(winRate*100).toFixed(1)}% | Avg P&L: ${avgPnl.toFixed(2)}%\n` +
+        `Insight: ${learning.keyInsight}`
       );
     }
   } catch(e) { console.warn('[LEARNING] Failed:', e.message); }
@@ -3553,14 +3643,10 @@ async function checkMacroEvents() {
         const wasStopLossPct = botConfig.stopLossPct;
         const tightened      = Math.max(3, botConfig.stopLossPct - 2);
 
-        await sendTelegram(
-          `📅 <b>MACRO EVENT IN ${Math.round(minutesUntil)} MINUTES</b>\n\n` +
-          `📊 <b>${event.title}</b>\n` +
-          `Country: ${event.country} | Impact: 🔴 HIGH\n` +
-          `Time: ${event.time} (UTC)\n\n` +
-          `⚠️ High-impact events can cause sudden volatility.\n` +
-          `Your stop-loss has been temporarily tightened from ${wasStopLossPct}% to ${tightened}% during this event.\n\n` +
-          `💡 Consider reducing position sizes until after the announcement.`
+        queueNotification('macroEvents',
+          `📅 MACRO EVENT IN ${Math.round(minutesUntil)}min: ${event.title}`,
+          `${event.country} | Impact: HIGH | ${event.time} UTC\n` +
+          `Stop-loss tightened from ${wasStopLossPct}% → ${tightened}% during event.`
         );
 
         // Temporarily tighten stop-loss
@@ -4245,7 +4331,7 @@ app.post('/api/waitlist', async (req, res) => {
 
     // Notify yourself on Telegram when someone signs up
     if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
-      await sendTelegram(`🎉 <b>New waitlist signup!</b>\n\n👤 ${name}\n📧 ${email}\n\nTotal signups: ${waitlistSignups.length}`);
+      queueNotification('waitlist', `New signup: ${name}`, `📧 ${email} | Total: ${waitlistSignups.length}`);
     }
 
     res.json({ success: true, message: 'Added to waitlist', total: waitlistSignups.length });
@@ -4347,6 +4433,25 @@ app.post('/api/signal/full', requireAuth, async (req, res) => {
 // AUTO-SELL BOT ROUTES
 // ═══════════════════════════════════════════════════════════════
 app.get('/api/bot/config',  requireAuth, (req, res) => res.json({ success:true, data:{ ...botConfig, state:botState } }));
+// Get/update notification settings
+app.get('/api/notifications/settings', requireAuth, (req, res) => {
+  res.json({ success:true, data: { notifications: botConfig.notifications, api: botConfig.api } });
+});
+
+app.post('/api/notifications/settings', requireAuth, (req, res) => {
+  const { notifications, api } = req.body;
+  if (notifications) Object.assign(botConfig.notifications, notifications);
+  if (api)           Object.assign(botConfig.api, api);
+  saveData();
+  res.json({ success:true, data: { notifications: botConfig.notifications, api: botConfig.api } });
+});
+
+// Force flush digest queues on demand
+app.post('/api/notifications/flush', requireAuth, async (req, res) => {
+  res.json({ success:true, message:'Flushing digest queues...' });
+  await flushDigestQueues();
+});
+
 // ATR stop loss info for current holdings
 app.get('/api/atr/:pair', requireAuth, async (req, res) => {
   try {
@@ -5031,7 +5136,7 @@ async function analyseChartWithVision(pair, candles, indicators) {
     const lastCandle = candles[candles.length - 1];
     const cacheKey   = `${pair}_${lastCandle[0]}`;
     const cached     = visionCache[cacheKey];
-    if (cached && (Date.now() - cached.timestamp) < 15 * 60 * 1000) {
+    if (cached && (Date.now() - cached.timestamp) < 60 * 60 * 1000) { // 60min cache (was 15min)
       return cached.analysis;
     }
 
