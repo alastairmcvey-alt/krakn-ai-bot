@@ -1941,8 +1941,15 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
     }
 
     const mode = botConfig.currencyMode || 'AUD';
-    const availableCash = mode === 'USD' ? usdCash : mode === 'BOTH' ? audCash + usdCash : audCash;
-    if (availableCash < 10) { console.log('[BUY CHECK] Insufficient cash'); return; }
+
+    // Total available cash — Kraken auto-converts AUD↔USD on spot trades
+    // so always use AUD as the primary pool regardless of pair currency
+    const totalCashAUD  = audCash + (usdCash * 1.55); // rough AUD conversion
+    const availableCash = totalCashAUD;
+    if (availableCash < 10) {
+      console.log(`[BUY CHECK] Insufficient cash — AUD: ${audCash.toFixed(2)}, USD: ${usdCash.toFixed(2)}`);
+      return false;
+    }
 
     let bestOpportunity = null;
 
@@ -1999,8 +2006,10 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       return false; // signal caller that nothing was found
     }
 
-    const pairCurr     = pairCurrency(bestOpportunity.pair);
-    const cashForPair  = pairCurr === 'USD' ? usdCash : audCash;
+    const pairCurr    = pairCurrency(bestOpportunity.pair);
+    // Always use AUD cash pool — Kraken auto-converts when buying USD pairs
+    // This prevents "insufficient USD cash" when you have AUD available
+    const cashForPair = audCash > 10 ? audCash : (usdCash * 1.55); // use AUD, fall back to USD converted
 
     // ── Position sizing by conviction (Improvement 4) ─────────
     // Scale trade size based on signal confidence
@@ -2008,14 +2017,15 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
     const baseSizeAUD   = Math.min(cashForPair * 0.25, cashForPair - 10);
     const suggestedAUD  = Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40); // never more than 40% of cash
     if (suggestedAUD < 5) {
-      console.log(`[BUY CHECK] suggestedAUD too small (${suggestedAUD.toFixed(2)}) — cash: ${cashForPair.toFixed(2)}`);
+      console.log(`[BUY CHECK] suggestedAUD too small (${suggestedAUD.toFixed(2)}) — AUD: ${audCash.toFixed(2)}, USD: ${usdCash.toFixed(2)}`);
       if (manualTrigger) {
         await sendTelegram(
           `⚠️ <b>Buy opportunity found but insufficient cash</b>\n\n` +
           `${bestOpportunity.displayPair} at ${bestOpportunity.confidence}% confidence\n` +
-          `Available ${pairCurr} cash: ${fmtAUDServer(cashForPair)}\n` +
+          `Available AUD cash: ${fmtAUDServer(audCash)}\n` +
+          `Available USD cash: US$${usdCash.toFixed(2)}\n` +
           `Minimum required: A$10\n\n` +
-          `Deposit more funds to Kraken or reduce your minimum trade size.`
+          `Deposit more AUD to your Kraken account to enable trading.`
         );
       }
       return false;
@@ -2777,7 +2787,8 @@ app.post('/api/advisor/run', requireAuth, async (req, res) => {
 app.post('/api/buycheck/run', requireAuth, async (req, res) => {
   res.json({ success: true, message: 'Running buy check now — check Telegram!' });
   try {
-    const pairs = getActivePairs(botConfig.currencyMode);
+    // Only scan active mode pairs capped at 7 — prevents 30-pair scan
+    const pairs = getActivePairs(botConfig.currencyMode).slice(0, 7);
     const marketData = [];
     for (const pair of pairs) {
       try {
@@ -2790,14 +2801,14 @@ app.post('/api/buycheck/run', requireAuth, async (req, res) => {
         });
       } catch(e) {}
     }
-    const found = await checkBuyOpportunities(marketData, true); // true = manual trigger
+    const found = await checkBuyOpportunities(marketData, true);
     if (!found) {
       await sendTelegram(
         `🔍 <b>Manual Buy Check Complete</b>\n\n` +
-        `Scanned ${pairs.length} pairs — no qualifying opportunities found right now.\n\n` +
+        `Scanned ${pairs.length} pairs in ${botConfig.currencyMode} mode — no qualifying opportunities right now.\n\n` +
         `Signals need: BUY action + ${advisorSettings.minConfidence}%+ confidence\n` +
         `Current regime filters may be suppressing weak signals.\n\n` +
-        `Try again in 30-60 minutes or lower confidence threshold in Bot settings.`
+        `Try again in 30-60 minutes or lower your confidence threshold in Bot settings.`
       );
     }
   } catch(e) {
