@@ -278,6 +278,23 @@ async function fetchOHLCUniversal(symbol, interval) {
 }
 
 // Fallback pair names to try if primary fails
+// Maps USD crypto pairs to their AUD equivalents for when user only has AUD
+const USD_TO_AUD_MAP = {
+  'XBTUSD':  'XBTAUD',
+  'ETHUSD':  'ETHAUD',
+  'SOLUSD':  'SOLAUD',
+  'XRPUSD':  'XRPAUD',
+  'ADAUSD':  'ADAAUD',
+  'LTCUSD':  'LTCAUD',
+  'DOTUSD':  'DOTAUD',
+  'LINKUSD': 'LINKAUD',
+};
+
+// If we have AUD but not USD, reroute a USD pair to its AUD equivalent
+function rerouteToAUD(pair) {
+  return USD_TO_AUD_MAP[pair] || null;
+}
+
 const PAIR_ALIASES = {
   'DOTAUD':  ['DOTAUD','DOT/AUD','XDOTAUD'],
   'LINKAUD': ['LINKAUD','LINK/AUD'],
@@ -1402,8 +1419,9 @@ async function computeSignalForPair(pair) {
     else if (weightedScore >= 3)  { action='BUY';  confidence=Math.min(70,45+(weightedScore/maxScore)*30); }
     else if (weightedScore <= -3) { action='SELL'; confidence=Math.min(70,45+(Math.abs(weightedScore)/maxScore)*30); }
 
-    if (botConfig.riskLevel === 'conservative') confidence *= 0.85;
-    if (botConfig.riskLevel === 'aggressive')   confidence *= 1.10;
+    // ── Risk level base adjustment (apply once, not multiplicative) ──
+    if (botConfig.riskLevel === 'conservative') confidence = Math.max(0, confidence - 5);
+    if (botConfig.riskLevel === 'aggressive')   confidence = Math.min(99, confidence + 5);
 
     const allSignals = [
       ...tf15.signals.map(s => `15m: ${s}`),
@@ -1444,29 +1462,24 @@ async function computeSignalForPair(pair) {
         // Classify regime
         if (lastPrice > ema20 && ema20 > ema50 && higherHighs) {
           regime = 'BULL';
-          regimeModifier = action === 'BUY' ? 1.15 : 0.90; // boost buys, dampen sells in bull
-          allSignals.push(`📈 Market regime: BULL (price > EMA20 > EMA50, higher highs)`);
+          if (action === 'BUY') confidence = Math.min(99, confidence + 8);
+          allSignals.push(`📈 Regime: BULL`);
+
         } else if (lastPrice < ema20 && ema20 < ema50 && lowerLows) {
           regime = 'BEAR';
-          regimeModifier = action === 'SELL' ? 1.15 : 0.75; // boost sells, strongly dampen buys in bear
-          allSignals.push(`📉 Market regime: BEAR (price < EMA20 < EMA50, lower lows)`);
-          // In bear regime: don't buy unless extremely oversold
           if (action === 'BUY' && tf60.rsi > 25) {
             action = 'HOLD';
-            allSignals.push('🐻 Bear regime: suppressing BUY signal');
+            allSignals.push('🐻 Bear regime: suppressing BUY');
           }
+          allSignals.push(`📉 Regime: BEAR`);
+
         } else {
           regime = 'SIDEWAYS';
-          regimeModifier = 0.90; // mild penalty — don't kill signals completely
-          allSignals.push(`↔️ Market regime: SIDEWAYS (mixed signals)`);
-          // In sideways: only suppress very weak signals (below 65%)
-          // Was 80% — too aggressive, was killing all signals
-          if (confidence < 65 && action !== 'HOLD') {
-            allSignals.push('↔️ Sideways regime: weak signal suppressed');
-            action = 'HOLD';
-          }
+          // Small flat penalty only — not multiplicative
+          if (action !== 'HOLD') confidence = Math.max(0, confidence - 5);
+          allSignals.push(`↔️ Regime: SIDEWAYS`);
         }
-        confidence = Math.min(99, confidence * regimeModifier);
+        // Note: no confidence *= regimeModifier here — adjustments done above
       }
     } catch(e) { console.warn(`[REGIME] ${sym}:`, e.message); }
 
@@ -1487,11 +1500,11 @@ async function computeSignalForPair(pair) {
 
         if (volRatio >= 1.5) {
           allSignals.push(`📊 Volume confirmed: ${volRatio.toFixed(1)}x above average`);
-          confidence = Math.min(99, confidence * 1.08); // volume confirmation boost
+          confidence = Math.min(99, confidence + 5); // flat boost, not multiplicative
           volumeConfirmed = true;
         } else if (volRatio < 0.8 && action !== 'HOLD') {
-          allSignals.push(`⚠️ Low volume: only ${volRatio.toFixed(1)}x average — weak signal`);
-          confidence *= 0.88; // penalise low-volume signals
+          allSignals.push(`⚠️ Low volume: ${volRatio.toFixed(1)}x average`);
+          confidence = Math.max(0, confidence - 5); // flat penalty only
           volumeConfirmed = false;
         }
       }
@@ -1528,14 +1541,12 @@ async function computeSignalForPair(pair) {
 
         if (fundingRate !== undefined && fundingRate !== null) {
           const annualisedFunding = fundingRate * 3 * 365 * 100; // convert to annual %
-          if (fundingRate > 0.01) { // extremely positive — market very long
-            allSignals.push(`🔴 Funding extreme positive (${annualisedFunding.toFixed(0)}%/yr) — crowded long, squeeze risk`);
-            if (action === 'BUY') confidence *= 0.82; // penalise buys in crowded long
-          } else if (fundingRate < -0.005) { // negative — market very short
-            allSignals.push(`🟢 Funding negative (${annualisedFunding.toFixed(0)}%/yr) — crowded short, squeeze opportunity`);
-            if (action === 'BUY') confidence = Math.min(99, confidence * 1.12); // boost buys vs crowded short
-          } else {
-            allSignals.push(`💤 Funding neutral (${(fundingRate*100).toFixed(4)}%)`);
+          if (fundingRate > 0.01) {
+            allSignals.push(`🔴 Funding extreme positive — crowded long`);
+            if (action === 'BUY') confidence = Math.max(0, confidence - 8);
+          } else if (fundingRate < -0.005) {
+            allSignals.push(`🟢 Funding negative — crowded short, squeeze risk`);
+            if (action === 'BUY') confidence = Math.min(99, confidence + 5);
           }
         }
       }
@@ -1601,26 +1612,26 @@ async function computeSignalForPair(pair) {
 
         if (totalTFs > 0) {
           if (bullishTFs >= 3) {
-            confidence = Math.min(97, confidence * (1 + bullishTFs * 0.06));
+            confidence = Math.min(97, confidence + (bullishTFs * 4));
             visionSignals.push(`👁 ${bullishTFs}/${totalTFs} timeframes BULLISH`);
             if (action !== 'BUY' && bullishTFs >= 4) { action='BUY'; visionSignals.push('👁 Vision consensus → BUY'); }
           } else if (bearishTFs >= 3) {
-            confidence = Math.min(97, confidence * (1 + bearishTFs * 0.06));
+            confidence = Math.min(97, confidence + (bearishTFs * 4));
             visionSignals.push(`👁 ${bearishTFs}/${totalTFs} timeframes BEARISH`);
             if (action !== 'SELL' && bearishTFs >= 4) { action='SELL'; visionSignals.push('👁 Vision consensus → SELL'); }
           }
           if (bullishTFs >= 2 && bearishTFs >= 2) {
-            confidence *= 0.85;
+            confidence = Math.max(0, confidence - 8); // flat penalty for mixed vision
             visionSignals.push(`⚠️ Vision mixed: ${bullishTFs} bull vs ${bearishTFs} bear`);
           }
           if (vision?.visionAction === action && vision?.patternStrength >= 7) {
-            confidence = Math.min(97, confidence * 1.12);
+            confidence = Math.min(97, confidence + 8);
           }
           const dailyVision = visionAll['1d'];
           if (dailyVision?.visionAction && dailyVision.visionAction !== action &&
               dailyVision.visionAction !== 'HOLD' && dailyVision.visionConfidence >= 75) {
-            confidence *= 0.80;
-            visionSignals.push(`⚠️ Daily disagrees: ${dailyVision.visionAction} (${dailyVision.visualPattern})`);
+            confidence = Math.max(0, confidence - 10); // daily disagreement is meaningful
+            visionSignals.push(`⚠️ Daily disagrees: ${dailyVision.visionAction}`);
           }
         }
         allSignals.push(...visionSignals);
@@ -2007,13 +2018,51 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
     }
 
     const pairCurr    = pairCurrency(bestOpportunity.pair);
-    // Always use AUD cash pool — Kraken auto-converts when buying USD pairs
-    // This prevents "insufficient USD cash" when you have AUD available
-    const cashForPair = audCash > 10 ? audCash : (usdCash * 1.55); // use AUD, fall back to USD converted
+    const cashForPair = pairCurr === 'USD' ? usdCash : audCash;
 
     // ── Position sizing by conviction (Improvement 4) ─────────
     // Scale trade size based on signal confidence
-    const posMultiplier = bestOpportunity.signal?.positionSizeMultiplier || 1.0;
+    // If pair is USD-denominated and we have no USD, reroute to AUD equivalent
+    if (pairCurrency(bestOpportunity.pair) === 'USD' && usdCash < 5 && audCash >= 10) {
+      const audPair = rerouteToAUD(bestOpportunity.pair);
+      if (audPair) {
+        console.log(`[BUY CHECK] Rerouting ${bestOpportunity.pair} → ${audPair} (no USD cash, using AUD)`);
+        // Fetch fresh ticker for the AUD pair
+        try {
+          const audTicker = await fetchSingleTicker(audPair);
+          if (audTicker) {
+            bestOpportunity.pair        = audPair;
+            bestOpportunity.displayPair = PAIR_DISPLAY[audPair] || audPair;
+            bestOpportunity.price       = audTicker.price;
+          }
+        } catch(e) { console.warn('[BUY CHECK] AUD reroute ticker failed:', e.message); }
+      } else {
+        // No AUD equivalent — skip with explanation
+        console.log(`[BUY CHECK] No AUD equivalent for ${bestOpportunity.pair} — skipping`);
+        if (manualTrigger) {
+          await sendTelegram(
+            `⚠️ <b>USD pair — no AUD equivalent</b>\n\n` +
+            `${bestOpportunity.displayPair} at ${bestOpportunity.confidence}% confidence\n` +
+            `This pair has no AUD equivalent on Kraken.\n` +
+            `Convert some AUD to USD on Kraken to trade this pair.`
+          );
+        }
+        return false;
+      }
+    }
+
+    // Final check: if still USD pair with no USD cash, skip
+    if (pairCurrency(bestOpportunity.pair) === 'USD' && usdCash < 5) {
+      if (manualTrigger) {
+        await sendTelegram(
+          `⚠️ <b>Insufficient USD balance</b>\n\n` +
+          `Signal found for ${bestOpportunity.displayPair} but you have no USD.\n` +
+          `Your AUD balance: ${fmtAUDServer(audCash)}\n` +
+          `Switch to AUD mode in the app to trade with your AUD.`
+        );
+      }
+      return false;
+    }
     const baseSizeAUD   = Math.min(cashForPair * 0.25, cashForPair - 10);
     const suggestedAUD  = Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40); // never more than 40% of cash
     if (suggestedAUD < 5) {
