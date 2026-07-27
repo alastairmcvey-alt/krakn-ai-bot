@@ -691,16 +691,17 @@ function loadData() {
       if (data.signalWeights)       Object.assign(signalWeights, data.signalWeights);
       if (data.tradeOutcomes)       tradeOutcomes       = data.tradeOutcomes;
       // Auto-restart bot if it was running before the server restarted
-      // Delay 45s — gives Railway time to complete health check before heavy computation
+      // Delay 3 minutes — well past Railway health check window (30s)
+      // and past vision analysis startup tasks
       if (data.botRunning) {
-        console.log('[LOAD] Bot was running — auto-starting in 45s (after health check)');
+        console.log('[LOAD] Bot was running — auto-starting in 3min (after health check)');
         setTimeout(() => {
           if (!botState.running) {
             botState.running = true;
             startAutoSellLoop();
             console.log('[LOAD] ✅ Bot auto-restarted');
           }
-        }, 45000);
+        }, 3 * 60 * 1000);
       }
       console.log(`[LOAD] ✅ Settings restored from ${src} — bot was ${data.botRunning ? 'ON (restarting)' : 'OFF'}`);
       console.log(`[LOAD] risk=${botConfig.riskLevel} confidence=${botConfig.confidenceMin}% stopLoss=${botConfig.stopLossPct}%`);
@@ -1984,7 +1985,7 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
         if (!strongSignal && !weakSignal) continue;
 
         const ticker = await fetchSingleTicker(d.pair);
-        if (!ticker) continue;
+        if (!ticker) { console.log(`[BUY CHECK] No ticker for ${d.pair} — skipping`); continue; }
 
         // Get sentiment for extra context
         const sym       = (d.displayPair || PAIR_DISPLAY[d.pair] || d.pair).replace('/AUD','');
@@ -5597,43 +5598,48 @@ app.get('/api/onchain/:sym', requireAuth, async (req, res) => {
 });
 
 // ─── Start Server ──────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log('');
   console.log('╔════════════════════════════════════════╗');
   console.log('║        KRAKN·AI Bot Server v4.0        ║');
   console.log('╠════════════════════════════════════════╣');
   console.log(`║  Port:     ${PORT}                         ║`);
-  console.log(`║  Currency: 🇦🇺 AUD                     ║`);
   console.log(`║  Keys:     ${!!(KRAKEN_API_KEY&&KRAKEN_API_SECRET)?'✅':'❌'}                         ║`);
   console.log(`║  AI:       ${!!(process.env.ANTHROPIC_API_KEY)?'✅':'❌'}                         ║`);
   console.log(`║  Telegram: ${!!(TELEGRAM_TOKEN&&TELEGRAM_CHAT_ID)?'✅':'❌'}                         ║`);
   console.log('╚════════════════════════════════════════╝');
   console.log('');
-  // Load saved settings first — restores all config from last session
-  loadData();
-  // Schedule recurring tasks
+
+  // ── Step 1: Load saved data (sync-safe wrapper) ───────────
+  // Wrapped in try/catch so a missing volume file never crashes startup
+  try { loadData(); } catch(e) { console.warn('[STARTUP] loadData failed:', e.message, '— using defaults'); }
+
+  // ── Step 2: Schedule recurring intervals ──────────────────
+  // These register the timers but don't run immediately
   scheduleAdvisor();
   scheduleBuyCheck();
   scheduleDCA();
 
-  // ── Recurring intervals (start immediately after boot, run every N minutes) ──
-  setInterval(async () => { try { await checkVolumeAnomalies(); } catch(e) { console.error("[VOLUME]", e.message); } }, 15 * 60 * 1000);
-  setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART MONEY]', e.message); } }, 15 * 60 * 1000);
-  setInterval(async () => { try { await checkMacroEvents(); }       catch(e) { console.error('[MACRO]', e.message); } }, 30 * 60 * 1000);
-  setInterval(async () => { try { await checkGridOrders(); }        catch(e) { console.error('[GRID]', e.message); } }, 5 * 60 * 1000);
-  setInterval(async () => { try { await checkAndRebalance(); }      catch(e) { console.error('[REBALANCE]', e.message); } }, 4 * 60 * 60 * 1000);
-  setInterval(async () => { try { await buildCorrelationMatrix(); } catch(e) { console.error('[CORRELATION]', e.message); } }, 6 * 60 * 60 * 1000);
-  setInterval(async () => { try { await recordPortfolioSnapshot(); } catch(e) { console.error('[PORTFOLIO]', e.message); } }, 6 * 60 * 60 * 1000);
+  setInterval(async () => { try { await checkVolumeAnomalies();   } catch(e) { console.error('[VOLUME]', e.message); } }, 15 * 60 * 1000);
+  setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART]', e.message);  } }, 15 * 60 * 1000);
+  setInterval(async () => { try { await checkMacroEvents();       } catch(e) { console.error('[MACRO]', e.message);  } }, 30 * 60 * 1000);
+  setInterval(async () => { try { await checkGridOrders();        } catch(e) { console.error('[GRID]', e.message);   } }, 5  * 60 * 1000);
+  setInterval(async () => { try { await checkAndRebalance();      } catch(e) { console.error('[REBAL]', e.message);  } }, 4  * 60 * 60 * 1000);
+  setInterval(async () => { try { await buildCorrelationMatrix(); } catch(e) { console.error('[CORR]', e.message);   } }, 6  * 60 * 60 * 1000);
+  setInterval(async () => { try { await recordPortfolioSnapshot();} catch(e) { console.error('[SNAP]', e.message);   } }, 6  * 60 * 60 * 1000);
+  setInterval(flushDigestQueues, 30 * 60 * 1000);
 
-  // ── DELAYED FIRST RUNS — all heavy tasks wait until AFTER Railway health check ──
-  // Railway health check window is 30 seconds. Nothing heavy before 60s.
-  setTimeout(registerTelegramWebhook, 3000); // webhook is lightweight, OK early
-  setTimeout(async () => { try { await recordPortfolioSnapshot(); } catch(e){} }, 60 * 1000);      // 1 min
-  setTimeout(async () => { try { await checkVolumeAnomalies(); }    catch(e){} }, 90 * 1000);      // 1.5 min
-  setTimeout(() => { if (advisorSettings.enabled) runAdvisor(); },  2 * 60 * 1000);               // 2 min
-  setTimeout(async () => { try { await checkMacroEvents(); }        catch(e){} }, 3 * 60 * 1000); // 3 min
-  setTimeout(async () => { try { await checkSmartMoneySignals(); }  catch(e){} }, 4 * 60 * 1000); // 4 min
-  setTimeout(async () => { try { await buildCorrelationMatrix(); }  catch(e){} }, 7 * 60 * 1000); // 7 min
+  // ── Step 3: Delayed first runs — nothing heavy before 60s ─
+  // Railway health check window = 30s. Server must respond to /health first.
+  setTimeout(registerTelegramWebhook,                                          3  * 1000); // 3s  — lightweight
+  setTimeout(async () => { try { await checkBuyOpportunity(); }    catch(e){} }, 90 * 1000); // 1.5min — first buy check
+  setTimeout(async () => { try { await recordPortfolioSnapshot();} catch(e){} }, 2  * 60 * 1000); // 2min
+  setTimeout(async () => { try { await checkVolumeAnomalies(); }   catch(e){} }, 3  * 60 * 1000); // 3min
+  setTimeout(async () => { try { await checkMacroEvents(); }        catch(e){} }, 4  * 60 * 1000); // 4min
+  setTimeout(async () => { try { await checkSmartMoneySignals(); }  catch(e){} }, 5  * 60 * 1000); // 5min
+  setTimeout(async () => { try { await buildCorrelationMatrix(); }  catch(e){} }, 8  * 60 * 1000); // 8min
+  // Advisor runs at 10min — all data loaded, bot potentially running by then
+  setTimeout(() => { if (advisorSettings.enabled) runAdvisor(); }, 10 * 60 * 1000);
 });
 
 module.exports = app;
