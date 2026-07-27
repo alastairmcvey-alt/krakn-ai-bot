@@ -1792,11 +1792,12 @@ function scheduleAdvisor() {
 let buyCheckTimer = null;
 function scheduleBuyCheck() {
   if (buyCheckTimer) clearInterval(buyCheckTimer);
+  // Run every 30 minutes — more chances to catch signals at peak confidence
   buyCheckTimer = setInterval(async () => {
     try { await checkBuyOpportunity(); }
     catch(e) { console.error('[BUY CHECK] Interval error:', e.message); }
-  }, 60 * 60 * 1000);
-  console.log('[BUY CHECK] Scheduled every 1h (independent of advisor interval)');
+  }, 30 * 60 * 1000);
+  console.log('[BUY CHECK] Scheduled every 30min (independent of advisor interval)');
 }
 
 async function runAdvisor() {
@@ -1894,7 +1895,7 @@ ${balanceContext ? '💰 Suggested: $[amount] AUD' : ''}
 Use 🟢 BUY, 🔴 SELL, 🟡 HOLD. Use 📈 if up, 📉 if down.
 ${newsContext ? '\n📰 <b>NEWS:</b> [one sentence]' : ''}
 
-Only include coins above ${advisorSettings.minConfidence}% confidence. If none qualify say "No strong signals right now."`;
+Only include coins above ${botConfig.confidenceMin}% confidence. If none qualify say "No strong signals right now."`;
 
     if (advice) {
       const advSetting = botConfig.notifications?.advisor;
@@ -1919,21 +1920,20 @@ Only include coins above ${advisorSettings.minConfidence}% confidence. If none q
 // ─── Standalone Buy Opportunity Check ─────────────────────────
 // Runs every hour independently so daily advisor doesn't kill buy signals
 // Scans ALL pairs — not just the advisor pairs
+let buyNotifyCache = {}; // { pair: lastNotifiedTimestamp } — prevents spam
+
 async function checkBuyOpportunity() {
   try {
     console.log('[BUY CHECK] Scanning all pairs...');
     const marketData = [];
-    for (const pair of getActivePairs(botConfig.currencyMode)) { // ALL pairs, not just advisor pairs
+    for (const pair of getActivePairs(botConfig.currencyMode).slice(0, 10)) {
       try {
         const ticker = await fetchSingleTicker(pair);
         if (!ticker) continue;
         marketData.push({
-          pair,
-          displayPair: PAIR_DISPLAY[pair] || pair,
-          price:   ticker.price,
-          change24h: ticker.change24h,
-          high:    ticker.high,
-          low:     ticker.low,
+          pair, displayPair: PAIR_DISPLAY[pair] || pair,
+          price: ticker.price, change24h: ticker.change24h,
+          high: ticker.high, low: ticker.low,
         });
       } catch(e) {}
     }
@@ -1968,14 +1968,18 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       try {
         const signal = d.signal || await computeSignalForPair(d.pair);
 
-        const rsiOversold  = signal.rsi <= 32;
-        // Slightly lower threshold for scheduled checks vs manual (55 vs 65)
-        // so you don't miss real opportunities
-        const threshold    = manualTrigger ? advisorSettings.minConfidence : Math.max(55, advisorSettings.minConfidence - 10);
+        const rsiOversold  = signal.rsi <= 35;
+
+        // Threshold comes from app Bot settings — respects confidenceMin and riskLevel
+        // If you set 65% in the app and save, the bot uses 65%
+        // Conservative adds 5% (harder), Aggressive removes 5% (easier)
+        let threshold = botConfig.confidenceMin || 65;
+        if (botConfig.riskLevel === 'conservative') threshold = Math.min(90, threshold + 5);
+        if (botConfig.riskLevel === 'aggressive')   threshold = Math.max(50, threshold - 5);
+
         const strongSignal = signal.action === 'BUY' && signal.confidence >= threshold;
         const weakSignal   = signal.action === 'BUY' && rsiOversold && signal.confidence >= (threshold - 10);
-
-        console.log(`[BUY CHECK] ${d.pair}: ${signal.action} ${signal.confidence}% (threshold: ${threshold}%) — ${strongSignal||weakSignal?'QUALIFIES':'skip'}`);
+        console.log(`[BUY CHECK] ${d.pair}: ${signal.action} ${signal.confidence}% RSI:${signal.rsi} threshold:${threshold}% (${botConfig.riskLevel}) — ${strongSignal||weakSignal?'✅ QUALIFIES':'skip'}`);
 
         if (!strongSignal && !weakSignal) continue;
 
@@ -2167,6 +2171,14 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       const autoBuyNote = botConfig.autoBuy
         ? `\n⚠️ Auto-buy active but confidence (${bestOpportunity.confidence}%) below threshold (${botConfig.autoBuyMinConfidence}%) — manual prompt sent`
         : '';
+
+      // Cooldown: max one notification per coin per 4 hours (prevents repeated alerts on same signal)
+      const lastNotified = buyNotifyCache[bestOpportunity.pair] || 0;
+      if (!manualTrigger && (Date.now() - lastNotified) < 4 * 60 * 60 * 1000) {
+        console.log(`[BUY CHECK] ${bestOpportunity.displayPair} qualifies but in 4h cooldown — skipping`);
+        return false;
+      }
+      buyNotifyCache[bestOpportunity.pair] = Date.now();
 
       await sendTelegram(
         `🟢 <b>BUY OPPORTUNITY DETECTED!</b>\n\n` +
@@ -2473,13 +2485,13 @@ async function handleTelegramMessage(chatId, userMessage, username) {
           const s = d.signal;
           if (!s) return `• ${d.displayPair}: signal error`;
           if (s.action !== 'BUY') return `• ${d.displayPair}: ${s.action} signal (${s.confidence}%)`;
-          if (s.confidence < advisorSettings.minConfidence) return `• ${d.displayPair}: confidence ${s.confidence}% below threshold ${advisorSettings.minConfidence}%`;
+          if (s.confidence < botConfig.confidenceMin) return `• ${d.displayPair}: confidence ${s.confidence}% below threshold ${botConfig.confidenceMin}%`;
           return `• ${d.displayPair}: BUY ${s.confidence}% — passed filters`;
         }).join('\n');
 
         await sendTelegramTo(chatId,
           `🔍 <b>No buy triggered</b>\n\n${reasons}\n\n` +
-          `Threshold: ${advisorSettings.minConfidence}% confidence\n` +
+          `Threshold: ${botConfig.confidenceMin}% confidence\n` +
           `Cash required: minimum A$10\n` +
           `Tip: Fear & Greed at ${fearGreed.value||'?'}/100 — wait for stronger signals or lower your confidence threshold in bot settings.`
         );
@@ -2821,7 +2833,7 @@ app.post('/api/advisor/settings', requireAuth, (req, res) => {
   if (intervalHours)             advisorSettings.intervalHours = parseInt(intervalHours);
   if (enabled !== undefined)     advisorSettings.enabled       = enabled;
   if (pairs)                     advisorSettings.pairs         = pairs;
-  if (minConfidence)             advisorSettings.minConfidence = parseInt(minConfidence);
+  if (minConfidence)             botConfig.confidenceMin = parseInt(minConfidence);
   if (includeNews !== undefined) advisorSettings.includeNews   = includeNews;
   scheduleAdvisor();
   saveData(); // persist
@@ -2855,7 +2867,7 @@ app.post('/api/buycheck/run', requireAuth, async (req, res) => {
       await sendTelegram(
         `🔍 <b>Manual Buy Check Complete</b>\n\n` +
         `Scanned ${pairs.length} pairs in ${botConfig.currencyMode} mode — no qualifying opportunities right now.\n\n` +
-        `Signals need: BUY action + ${advisorSettings.minConfidence}%+ confidence\n` +
+        `Signals need: BUY action + ${botConfig.confidenceMin}%+ confidence\n` +
         `Current regime filters may be suppressing weak signals.\n\n` +
         `Try again in 30-60 minutes or lower your confidence threshold in Bot settings.`
       );
