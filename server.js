@@ -479,9 +479,9 @@ function getUnrealisedPnl(sym, currentPrice, currentQty) {
 
 // ─── Bot Config & State ────────────────────────────────────────
 let botConfig = {
-  riskLevel:            'conservative',
+  riskLevel:            'moderate',   // was 'conservative' which added +5% to threshold
   sellPct:              100,
-  confidenceMin:        75,
+  confidenceMin:        65,           // was 75 — ETH at 68% now qualifies
   checkInterval:        60,
   minHoldingValueAUD:   50,
   stopLossEnabled:      true,
@@ -2021,17 +2021,12 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       return false; // signal caller that nothing was found
     }
 
-    const pairCurr    = pairCurrency(bestOpportunity.pair);
-    const cashForPair = pairCurr === 'USD' ? usdCash : audCash;
-
-    // ── Position sizing by conviction (Improvement 4) ─────────
-    // Scale trade size based on signal confidence
-    // If pair is USD-denominated and we have no USD, reroute to AUD equivalent
-    if (pairCurrency(bestOpportunity.pair) === 'USD' && usdCash < 5 && audCash >= 10) {
+    // ── Currency rerouting and cash calculation ────────────────
+    // If USD pair but no USD cash: reroute to AUD equivalent automatically
+    if (pairCurrency(bestOpportunity.pair) === 'USD' && usdCash < 5) {
       const audPair = rerouteToAUD(bestOpportunity.pair);
-      if (audPair) {
-        console.log(`[BUY CHECK] Rerouting ${bestOpportunity.pair} → ${audPair} (no USD cash, using AUD)`);
-        // Fetch fresh ticker for the AUD pair
+      if (audPair && audCash >= 10) {
+        console.log(`[BUY CHECK] Rerouting ${bestOpportunity.pair} → ${audPair} (no USD, using AUD)`);
         try {
           const audTicker = await fetchSingleTicker(audPair);
           if (audTicker) {
@@ -2039,50 +2034,35 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
             bestOpportunity.displayPair = PAIR_DISPLAY[audPair] || audPair;
             bestOpportunity.price       = audTicker.price;
           }
-        } catch(e) { console.warn('[BUY CHECK] AUD reroute ticker failed:', e.message); }
-      } else {
-        // No AUD equivalent — skip with explanation
-        console.log(`[BUY CHECK] No AUD equivalent for ${bestOpportunity.pair} — skipping`);
+        } catch(e) { console.warn('[BUY CHECK] Reroute ticker failed:', e.message); }
+      } else if (!audPair || audCash < 10) {
+        // No equivalent or insufficient AUD — only show message on manual trigger
         if (manualTrigger) {
           await sendTelegram(
-            `⚠️ <b>USD pair — no AUD equivalent</b>\n\n` +
-            `${bestOpportunity.displayPair} at ${bestOpportunity.confidence}% confidence\n` +
-            `This pair has no AUD equivalent on Kraken.\n` +
-            `Convert some AUD to USD on Kraken to trade this pair.`
+            `⚠️ <b>${bestOpportunity.displayPair} signal found — no tradeable balance</b>\n\n` +
+            `Confidence: ${bestOpportunity.confidence}%\n` +
+            `USD balance: $${usdCash.toFixed(2)} | AUD balance: ${fmtAUDServer(audCash)}\n\n` +
+            `Deposit AUD to Kraken or switch to AUD mode to trade this signal.`
           );
         }
         return false;
       }
     }
 
-    // Final check: if still USD pair with no USD cash, skip
-    if (pairCurrency(bestOpportunity.pair) === 'USD' && usdCash < 5) {
-      if (manualTrigger) {
-        await sendTelegram(
-          `⚠️ <b>Insufficient USD balance</b>\n\n` +
-          `Signal found for ${bestOpportunity.displayPair} but you have no USD.\n` +
-          `Your AUD balance: ${fmtAUDServer(audCash)}\n` +
-          `Switch to AUD mode in the app to trade with your AUD.`
-        );
-      }
+    // Cash to use — always recalculate AFTER any rerouting
+    const finalPairCurr = pairCurrency(bestOpportunity.pair);
+    const cashForPair   = finalPairCurr === 'USD' ? usdCash : audCash;
+
+    if (cashForPair < 10) {
+      console.log(`[BUY CHECK] Insufficient ${finalPairCurr} cash: ${cashForPair.toFixed(2)}`);
       return false;
     }
+
+    // Position sizing by conviction
+    const posMultiplier = bestOpportunity.signal?.positionSizeMultiplier || 1.0;
     const baseSizeAUD   = Math.min(cashForPair * 0.25, cashForPair - 10);
-    const suggestedAUD  = Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40); // never more than 40% of cash
-    if (suggestedAUD < 5) {
-      console.log(`[BUY CHECK] suggestedAUD too small (${suggestedAUD.toFixed(2)}) — AUD: ${audCash.toFixed(2)}, USD: ${usdCash.toFixed(2)}`);
-      if (manualTrigger) {
-        await sendTelegram(
-          `⚠️ <b>Buy opportunity found but insufficient cash</b>\n\n` +
-          `${bestOpportunity.displayPair} at ${bestOpportunity.confidence}% confidence\n` +
-          `Available AUD cash: ${fmtAUDServer(audCash)}\n` +
-          `Available USD cash: US$${usdCash.toFixed(2)}\n` +
-          `Minimum required: A$10\n\n` +
-          `Deposit more AUD to your Kraken account to enable trading.`
-        );
-      }
-      return false;
-    }
+    const suggestedAUD  = Math.max(10, Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40));
+    console.log(`[BUY CHECK] ${bestOpportunity.displayPair} — cash: ${cashForPair.toFixed(2)}, size: ${suggestedAUD.toFixed(2)}, posMultiplier: ${posMultiplier}`);
 
     const volume   = (suggestedAUD / bestOpportunity.price).toFixed(8);
     const topPat   = bestOpportunity.patterns[0];
@@ -2174,8 +2154,9 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
 
       // Cooldown: max one notification per coin per 4 hours (prevents repeated alerts on same signal)
       const lastNotified = buyNotifyCache[bestOpportunity.pair] || 0;
-      if (!manualTrigger && (Date.now() - lastNotified) < 4 * 60 * 60 * 1000) {
-        console.log(`[BUY CHECK] ${bestOpportunity.displayPair} qualifies but in 4h cooldown — skipping`);
+      const cooldownMs   = 2 * 60 * 60 * 1000; // 2 hours between same-coin alerts
+      if (!manualTrigger && (Date.now() - lastNotified) < cooldownMs) {
+        console.log(`[BUY CHECK] ${bestOpportunity.displayPair} qualifies but in 2h cooldown — skipping`);
         return false;
       }
       buyNotifyCache[bestOpportunity.pair] = Date.now();
