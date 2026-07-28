@@ -1925,20 +1925,56 @@ let buyNotifyCache = {}; // { pair: lastNotifiedTimestamp } — prevents spam
 
 async function checkBuyOpportunity() {
   try {
-    console.log('[BUY CHECK] Scanning all pairs...');
-    const marketData = [];
-    for (const pair of getActivePairs(botConfig.currencyMode).slice(0, 10)) {
+    console.log('[BUY CHECK] Scanning pairs (fast mode — no vision)...');
+    const pairs = getActivePairs(botConfig.currencyMode).slice(0, 7);
+    const candidates = [];
+
+    // Phase 1: Fast scan — RSI + MACD + patterns only (no vision, no Claude API)
+    for (const pair of pairs) {
       try {
-        const ticker = await fetchSingleTicker(pair);
-        if (!ticker) continue;
-        marketData.push({
-          pair, displayPair: PAIR_DISPLAY[pair] || pair,
-          price: ticker.price, change24h: ticker.change24h,
-          high: ticker.high, low: ticker.low,
-        });
-      } catch(e) {}
+        const [tf15, tf60, tf240] = await Promise.all([
+          analyseTimeframe(pair, 15),
+          analyseTimeframe(pair, 60),
+          analyseTimeframe(pair, 240),
+        ]);
+        const weightedScore = (tf15.score * 0.5) + (tf60.score * 2) + (tf240.score * 4);
+        const rawConf = Math.min(95, 50 + Math.abs(weightedScore) / 26 * 45);
+        const action  = weightedScore >= 3 ? 'BUY' : weightedScore <= -3 ? 'SELL' : 'HOLD';
+
+        if (action === 'BUY' && rawConf >= (botConfig.confidenceMin - 10)) {
+          const ticker = await fetchSingleTicker(pair);
+          if (ticker) {
+            candidates.push({ pair, ticker, rsi: tf60.rsi, weightedScore, rawConf });
+            console.log(`[BUY CHECK] ${pair}: BUY ${rawConf.toFixed(0)}% RSI:${tf60.rsi} — candidate`);
+          }
+        } else {
+          console.log(`[BUY CHECK] ${pair}: ${action} ${rawConf.toFixed(0)}% — skip`);
+        }
+      } catch(e) { console.warn(`[BUY CHECK] ${pair} error:`, e.message); }
     }
+
+    if (!candidates.length) {
+      console.log('[BUY CHECK] No candidates found this run');
+      return;
+    }
+
+    // Phase 2: Full signal (with vision) only on the best candidate
+    // This keeps API costs low while still using vision on real opportunities
+    candidates.sort((a,b) => b.rawConf - a.rawConf);
+    const best = candidates[0];
+    console.log(`[BUY CHECK] Running full signal on best candidate: ${best.pair}`);
+
+    const marketData = [{
+      pair:        best.pair,
+      displayPair: PAIR_DISPLAY[best.pair] || best.pair,
+      price:       best.ticker.price,
+      change24h:   best.ticker.change24h,
+      high:        best.ticker.high,
+      low:         best.ticker.low,
+    }];
+
     await checkBuyOpportunities(marketData);
+
   } catch(e) { console.error('[BUY CHECK ERROR]', e.message); }
 }
 
