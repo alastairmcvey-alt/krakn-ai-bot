@@ -2087,7 +2087,17 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
 
     // ── AUTO-BUY MODE ─────────────────────────────────────────
     // If autoBuy is enabled AND confidence exceeds the higher auto threshold
-    // AND the trade size is within the safety cap — execute immediately
+    // Cooldown check — applies to BOTH auto-buy and manual prompt
+    // Prevents the same coin firing repeatedly on scheduled checks
+    const lastNotified = buyNotifyCache[bestOpportunity.pair] || 0;
+    const cooldownMs   = 2 * 60 * 60 * 1000;
+    if (!manualTrigger && (Date.now() - lastNotified) < cooldownMs) {
+      console.log(`[BUY CHECK] ${bestOpportunity.displayPair} qualifies but in 2h cooldown — skipping`);
+      return false;
+    }
+    buyNotifyCache[bestOpportunity.pair] = Date.now();
+
+    // ── AUTO-BUY MODE ─────────────────────────────────────────
     if (botConfig.autoBuy &&
         bestOpportunity.confidence >= botConfig.autoBuyMinConfidence &&
         suggestedAUD <= botConfig.autoBuyMaxAUD) {
@@ -2095,15 +2105,11 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       try {
         console.log(`[AUTO-BUY] Executing ${bestOpportunity.displayPair} — ${bestOpportunity.confidence}% confidence`);
 
-        // Calculate ATR stop for display in the buy notification
-        const atrStopInfo         = await calcDynamicStopLoss(bestOpportunity.pair, botConfig.atrMultiplier || 2.0);
+        const atrStopInfo             = await calcDynamicStopLoss(bestOpportunity.pair, botConfig.atrMultiplier || 2.0);
         const effectiveStopForDisplay = atrStopInfo?.stopPct || botConfig.stopLossPct;
 
         const order = await krakenPrivateRequest('AddOrder', {
-          pair:      bestOpportunity.pair,
-          type:      'buy',
-          ordertype: 'market',
-          volume,
+          pair: bestOpportunity.pair, type: 'buy', ordertype: 'market', volume,
         });
 
         recordTrade(bestOpportunity.pair, bestOpportunity.sym, 'buy', volume, bestOpportunity.price, 'auto-buy', bestOpportunity.signal?.signalConditions || null);
@@ -2129,14 +2135,16 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
         );
 
         console.log(`[AUTO-BUY] ✅ ${bestOpportunity.displayPair} — ${volume} @ ${bestOpportunity.price}`);
+        return true; // ← was missing — caused "no buy triggered" message after every auto-buy
 
       } catch(e) {
         console.error('[AUTO-BUY ERROR]', e.message);
         await sendTelegram(`❌ Auto-buy failed for ${bestOpportunity.displayPair}: ${e.message}`);
+        return false;
       }
 
     } else {
-      // ── MANUAL PROMPT MODE (default) ─────────────────────────
+      // ── MANUAL PROMPT MODE ─────────────────────────────────
       pendingBuyOpportunity = {
         pair:        bestOpportunity.pair,
         displayPair: bestOpportunity.displayPair,
@@ -2152,15 +2160,6 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       const autoBuyNote = botConfig.autoBuy
         ? `\n⚠️ Auto-buy active but confidence (${bestOpportunity.confidence}%) below threshold (${botConfig.autoBuyMinConfidence}%) — manual prompt sent`
         : '';
-
-      // Cooldown: max one notification per coin per 4 hours (prevents repeated alerts on same signal)
-      const lastNotified = buyNotifyCache[bestOpportunity.pair] || 0;
-      const cooldownMs   = 2 * 60 * 60 * 1000; // 2 hours between same-coin alerts
-      if (!manualTrigger && (Date.now() - lastNotified) < cooldownMs) {
-        console.log(`[BUY CHECK] ${bestOpportunity.displayPair} qualifies but in 2h cooldown — skipping`);
-        return false;
-      }
-      buyNotifyCache[bestOpportunity.pair] = Date.now();
 
       await sendTelegram(
         `🟢 <b>BUY OPPORTUNITY DETECTED!</b>\n\n` +
