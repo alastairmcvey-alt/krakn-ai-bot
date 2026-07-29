@@ -491,7 +491,7 @@ let botConfig = {
   atrMultiplier:        2.0,
   breakEvenTriggerPct:  2.0,
   trailingTriggerPct:   4.0,
-  minHoldMinutes:       60,
+  minHoldMinutes:       120,  // 2 hours minimum — was 60, giving trades more time to develop
   currencyMode:         'AUD',
   autoBuy:              false,
   autoBuyMaxAUD:        200,
@@ -4866,8 +4866,40 @@ async function runAutoSellCheck() {
       console.log(`[AUTO-SELL BOT] ${dp} Score:${signal.weightedScore} ${signal.action} ${signal.confidence}%`);
 
       if (signal.action !== 'SELL') continue;
-      if (signal.confidence < botConfig.confidenceMin) {
-        console.log(`[AUTO-SELL BOT] ${dp} skipped — confidence ${signal.confidence}% < ${botConfig.confidenceMin}%`);
+
+      // ── Sell quality filters ─────────────────────────────────
+      // Require higher confidence to sell than to buy
+      // This prevents selling on weak 15m noise
+      const sellConfidenceMin = Math.max(botConfig.confidenceMin + 10, 75);
+      if (signal.confidence < sellConfidenceMin) {
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — sell confidence ${signal.confidence}% < ${sellConfidenceMin}% required`);
+        continue;
+      }
+
+      // Never sell when RSI is oversold (< 35) — that's a dip, not a trend reversal
+      // Oversold RSI means the market has already fallen hard and a bounce is likely
+      if (signal.rsi < 35) {
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — RSI ${signal.rsi} oversold, holding for bounce`);
+        continue;
+      }
+
+      // Require at least 2 timeframes to agree on SELL (not just 15m noise)
+      const tfSells = [
+        signal.timeframes?.['15m']?.score < -2,
+        signal.timeframes?.['1h']?.score  < -2,
+        signal.timeframes?.['4h']?.score  < -2,
+      ].filter(Boolean).length;
+      if (tfSells < 2) {
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — only ${tfSells}/3 timeframes bearish (need 2+)`);
+        continue;
+      }
+
+      // Don't signal-sell within 2 hours of buying — stop-loss handles emergencies
+      const heldMins = lastBuyTimes[holding.sym]
+        ? (Date.now() - lastBuyTimes[holding.sym]) / 60000
+        : 9999;
+      if (heldMins < 120) {
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — only held ${heldMins.toFixed(0)} min, waiting 2h before signal sell`);
         continue;
       }
 
