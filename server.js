@@ -1418,6 +1418,7 @@ async function computeSignalForPair(pair) {
     // Base confidence from weighted score
     // Score 6 = 65%, Score 10 = 75%, Score 15 = 85%, Score 20+ = 95%
     // This means a genuine signal starts above threshold before any modifiers
+    let action = 'HOLD', confidence = 50;
     if (weightedScore >= 6)       { action='BUY';  confidence=Math.min(95, 60+(weightedScore/maxScore)*45); }
     else if (weightedScore <= -6) { action='SELL'; confidence=Math.min(95, 60+(Math.abs(weightedScore)/maxScore)*45); }
     else if (weightedScore >= 3)  { action='BUY';  confidence=Math.min(70, 50+(weightedScore/maxScore)*35); }
