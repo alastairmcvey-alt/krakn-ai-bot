@@ -1388,7 +1388,8 @@ async function fetchSentimentScore(sym) {
     return result;
   } catch(e) {
     console.warn(`[SENTIMENT] Failed for ${sym}:`, e.message);
-    sentimentCache[sym] = fallback; // cache failure to prevent repeated retries
+    // Cache failure for only 15 minutes so it retries soon
+    sentimentCache[sym] = { ...fallback, fetchedAt: Date.now() - (105 * 60 * 1000) }; // expires in 15min
     return fallback;
   }
 }
@@ -1414,11 +1415,13 @@ async function computeSignalForPair(pair) {
     const weightedScore = (tf15.score * 0.5) + (tf60.score * 2) + (tf240.score * 4);
     const maxScore      = 26;
 
-    let action = 'HOLD', confidence = 50;
-    if (weightedScore >= 6)       { action='BUY';  confidence=Math.min(95,55+(weightedScore/maxScore)*40); }
-    else if (weightedScore <= -6) { action='SELL'; confidence=Math.min(95,55+(Math.abs(weightedScore)/maxScore)*40); }
-    else if (weightedScore >= 3)  { action='BUY';  confidence=Math.min(70,45+(weightedScore/maxScore)*30); }
-    else if (weightedScore <= -3) { action='SELL'; confidence=Math.min(70,45+(Math.abs(weightedScore)/maxScore)*30); }
+    // Base confidence from weighted score
+    // Score 6 = 65%, Score 10 = 75%, Score 15 = 85%, Score 20+ = 95%
+    // This means a genuine signal starts above threshold before any modifiers
+    if (weightedScore >= 6)       { action='BUY';  confidence=Math.min(95, 60+(weightedScore/maxScore)*45); }
+    else if (weightedScore <= -6) { action='SELL'; confidence=Math.min(95, 60+(Math.abs(weightedScore)/maxScore)*45); }
+    else if (weightedScore >= 3)  { action='BUY';  confidence=Math.min(70, 50+(weightedScore/maxScore)*35); }
+    else if (weightedScore <= -3) { action='SELL'; confidence=Math.min(70, 50+(Math.abs(weightedScore)/maxScore)*35); }
 
     // ── Risk level base adjustment (apply once, not multiplicative) ──
     if (botConfig.riskLevel === 'conservative') confidence = Math.max(0, confidence - 5);
@@ -1476,8 +1479,8 @@ async function computeSignalForPair(pair) {
 
         } else {
           regime = 'SIDEWAYS';
-          // Small flat penalty only — not multiplicative
-          if (action !== 'HOLD') confidence = Math.max(0, confidence - 5);
+          // Very small penalty — sideways is the normal state, shouldn't kill good signals
+          if (action !== 'HOLD') confidence = Math.max(0, confidence - 2);
           allSignals.push(`↔️ Regime: SIDEWAYS`);
         }
         // Note: no confidence *= regimeModifier here — adjustments done above
@@ -1505,7 +1508,7 @@ async function computeSignalForPair(pair) {
           volumeConfirmed = true;
         } else if (volRatio < 0.8 && action !== 'HOLD') {
           allSignals.push(`⚠️ Low volume: ${volRatio.toFixed(1)}x average`);
-          confidence = Math.max(0, confidence - 5); // flat penalty only
+          confidence = Math.max(0, confidence - 3); // reduced from -5
           volumeConfirmed = false;
         }
       }
@@ -1621,9 +1624,13 @@ async function computeSignalForPair(pair) {
             visionSignals.push(`👁 ${bearishTFs}/${totalTFs} timeframes BEARISH`);
             if (action !== 'SELL' && bearishTFs >= 4) { action='SELL'; visionSignals.push('👁 Vision consensus → SELL'); }
           }
-          if (bullishTFs >= 2 && bearishTFs >= 2) {
-            confidence = Math.max(0, confidence - 8); // flat penalty for mixed vision
-            visionSignals.push(`⚠️ Vision mixed: ${bullishTFs} bull vs ${bearishTFs} bear`);
+          // Only penalise if more timeframes disagree than agree
+          if (action === 'BUY' && bearishTFs > bullishTFs) {
+            confidence = Math.max(0, confidence - 5);
+            visionSignals.push(`⚠️ Vision majority bearish (${bearishTFs} vs ${bullishTFs})`);
+          } else if (action === 'SELL' && bullishTFs > bearishTFs) {
+            confidence = Math.max(0, confidence - 5);
+            visionSignals.push(`⚠️ Vision majority bullish (${bullishTFs} vs ${bearishTFs})`);
           }
           if (vision?.visionAction === action && vision?.patternStrength >= 7) {
             confidence = Math.min(97, confidence + 8);
@@ -1631,7 +1638,7 @@ async function computeSignalForPair(pair) {
           const dailyVision = visionAll['1d'];
           if (dailyVision?.visionAction && dailyVision.visionAction !== action &&
               dailyVision.visionAction !== 'HOLD' && dailyVision.visionConfidence >= 75) {
-            confidence = Math.max(0, confidence - 10); // daily disagreement is meaningful
+            confidence = Math.max(0, confidence - 5); // reduced from -10
             visionSignals.push(`⚠️ Daily disagrees: ${dailyVision.visionAction}`);
           }
         }
@@ -2447,7 +2454,7 @@ async function handleTelegramMessage(chatId, userMessage, username) {
       const scanData  = []; // reuse for buy check so same signals are used
 
       // Limit to 4 pairs in Telegram scan to avoid timeout
-      const scanPairs = getActivePairs(botConfig.currencyMode).slice(0, 4);
+      const scanPairs = getActivePairs(botConfig.currencyMode); // all pairs, not just 4
 
       for (const pair of scanPairs) {
         try {
