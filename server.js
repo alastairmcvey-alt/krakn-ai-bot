@@ -1946,17 +1946,27 @@ async function checkBuyOpportunity() {
           analyseTimeframe(pair, 240),
         ]);
         const weightedScore = (tf15.score * 0.5) + (tf60.score * 2) + (tf240.score * 4);
-        const rawConf = Math.min(95, 50 + Math.abs(weightedScore) / 26 * 45);
-        const action  = weightedScore >= 3 ? 'BUY' : weightedScore <= -3 ? 'SELL' : 'HOLD';
+        const maxScore = 26;
 
-        if (action === 'BUY' && rawConf >= (botConfig.confidenceMin - 10)) {
+        // Use same formula as computeSignalForPair so scores match
+        let action = 'HOLD', rawConf = 50;
+        if (weightedScore >= 6)       { action='BUY';  rawConf=Math.min(95, 60+(weightedScore/maxScore)*45); }
+        else if (weightedScore <= -6) { action='SELL'; rawConf=Math.min(95, 60+(Math.abs(weightedScore)/maxScore)*45); }
+        else if (weightedScore >= 3)  { action='BUY';  rawConf=Math.min(70, 50+(weightedScore/maxScore)*35); }
+        else if (weightedScore <= -3) { action='SELL'; rawConf=Math.min(70, 50+(Math.abs(weightedScore)/maxScore)*35); }
+
+        // Quick regime check — don't run full daily candle fetch, just use RSI
+        // RSI < 40 in context of BUY = slight boost, RSI > 60 = neutral
+        if (action === 'BUY' && tf60.rsi < 35) rawConf = Math.min(95, rawConf + 5);
+
+        const threshold = botConfig.confidenceMin;
+        console.log(`[BUY CHECK] ${pair}: ${action} ${rawConf.toFixed(0)}% RSI:${tf60.rsi} ws:${weightedScore.toFixed(1)} — ${action==='BUY'&&rawConf>=threshold?'✅ CANDIDATE':'skip'}`);
+
+        if (action === 'BUY' && rawConf >= threshold) {
           const ticker = await fetchSingleTicker(pair);
           if (ticker) {
             candidates.push({ pair, ticker, rsi: tf60.rsi, weightedScore, rawConf });
-            console.log(`[BUY CHECK] ${pair}: BUY ${rawConf.toFixed(0)}% RSI:${tf60.rsi} — candidate`);
           }
-        } else {
-          console.log(`[BUY CHECK] ${pair}: ${action} ${rawConf.toFixed(0)}% — skip`);
         }
       } catch(e) { console.warn(`[BUY CHECK] ${pair} error:`, e.message); }
     }
