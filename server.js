@@ -350,10 +350,10 @@ const MIN_VOLUMES = {
 // ─── Advisor Settings ──────────────────────────────────────────
 let advisorSettings = {
   enabled:       true,
-  intervalHours: 4,   // Changed from 1h to 4h — reduces Claude API calls by 75%
-  pairs:         ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD'],  // reduced from 7 to 5 pairs
-  minConfidence: 65,  // restored — 70 was too restrictive
-  includeNews:   true,
+  intervalHours: 8,    // 8h (was 4h) — halves Claude advisor cost
+  pairs:         ['XBTAUD','ETHAUD','SOLAUD'], // 3 pairs (was 5) — saves 40% per run
+  minConfidence: 65,
+  includeNews:   false, // disabled — news fetching adds Claude calls
   lastRun:       null,
 };
 
@@ -525,7 +525,7 @@ let botConfig = {
     visionEnabled:          true,   // Claude vision chart analysis (most expensive)
     visionMaxPairsPerCheck: 3,      // max coins to run vision on per advisor cycle
     sentimentEnabled:       true,   // Claude sentiment analysis
-    sentimentCacheMins:     240,    // cache sentiment for 4 hours (was 2 hours)
+    sentimentCacheMins:     1440,   // 24h cache (was 4h) — sentiment doesn't change hourly
     advisorEnabled:         true,   // AI advisor runs
     advisorIntervalHours:   4,      // how often advisor runs (was 1 hour)
     onChainEnabled:         true,   // on-chain data fetches
@@ -1407,7 +1407,7 @@ function sentimentEmoji(score) {
   if (score >= -6) return '🔴 Bearish';
   return '💀 Extreme Fear';
 }
-async function computeSignalForPair(pair) {
+async function computeSignalForPair(pair, options = {}) {
   try {
     const sym = PAIR_DISPLAY[pair] || pair;
 
@@ -1586,10 +1586,13 @@ async function computeSignalForPair(pair) {
     } catch(e) { /* funding rate is bonus signal, not critical */ }
 
     // ── Multi-Timeframe Vision Analysis ──────────────────────
+    // COST CONTROL: Vision disabled for scheduled auto-checks (saves ~85% of API cost)
+    // Vision only runs when manualVision=true (manual Telegram "Any signals?" request)
+    // The RSI/MACD/pattern/regime engine handles all automated decisions
     let vision    = null;
     let visionAll = {};
 
-    if (createCanvas) {
+    if (createCanvas && options?.manualVision) {
       try {
         const tfConfigs = [
           { key:'15m', interval:15,   candles:80, weight:0.5, label:'15-Min' },
@@ -2497,7 +2500,7 @@ async function handleTelegramMessage(chatId, userMessage, username) {
 
       for (const pair of scanPairs) {
         try {
-          const signal  = await computeSignalForPair(pair);
+          const signal  = await computeSignalForPair(pair, { manualVision: true });
           await new Promise(r => setTimeout(r, 500));
           const ticker  = await fetchSingleTicker(pair);
           if (!ticker) continue;
@@ -5507,7 +5510,7 @@ async function analyseChartWithVision(pair, candles, indicators) {
     const lastCandle = candles[candles.length - 1];
     const cacheKey   = `${pair}_${lastCandle[0]}`;
     const cached     = visionCache[cacheKey];
-    if (cached && (Date.now() - cached.timestamp) < 60 * 60 * 1000) { // 60min cache (was 15min)
+    if (cached && (Date.now() - cached.timestamp) < 4 * 60 * 60 * 1000) { // 4h cache — manual only now
       return cached.analysis;
     }
 
@@ -5859,7 +5862,7 @@ app.listen(PORT, async () => {
   scheduleDCA();
 
   setInterval(async () => { try { await checkVolumeAnomalies();   } catch(e) { console.error('[VOLUME]', e.message); } }, 15 * 60 * 1000);
-  setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART]', e.message);  } }, 15 * 60 * 1000);
+  setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART]', e.message);  } }, 6 * 60 * 60 * 1000); // 6h (was 15min — huge cost saving)
   setInterval(async () => { try { await checkMacroEvents();       } catch(e) { console.error('[MACRO]', e.message);  } }, 30 * 60 * 1000);
   setInterval(async () => { try { await checkGridOrders();        } catch(e) { console.error('[GRID]', e.message);   } }, 5  * 60 * 1000);
   setInterval(async () => { try { await checkAndRebalance();      } catch(e) { console.error('[REBAL]', e.message);  } }, 4  * 60 * 60 * 1000);
@@ -5874,7 +5877,7 @@ app.listen(PORT, async () => {
   setTimeout(async () => { try { await recordPortfolioSnapshot();} catch(e){} }, 2  * 60 * 1000); // 2min
   setTimeout(async () => { try { await checkVolumeAnomalies(); }   catch(e){} }, 3  * 60 * 1000); // 3min
   setTimeout(async () => { try { await checkMacroEvents(); }        catch(e){} }, 4  * 60 * 1000); // 4min
-  setTimeout(async () => { try { await checkSmartMoneySignals(); }  catch(e){} }, 5  * 60 * 1000); // 5min
+  setTimeout(async () => { try { await checkSmartMoneySignals(); }  catch(e){} }, 10 * 60 * 1000); // 10min
   setTimeout(async () => { try { await buildCorrelationMatrix(); }  catch(e){} }, 8  * 60 * 1000); // 8min
   // Advisor runs at 10min — all data loaded, bot potentially running by then
   setTimeout(() => { if (advisorSettings.enabled) runAdvisor(); }, 10 * 60 * 1000);
