@@ -2034,8 +2034,11 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
     let audCash = 0, usdCash = 0;
     if (KRAKEN_API_KEY && KRAKEN_API_SECRET) {
       const bal = await krakenPrivateRequest('Balance');
-      audCash   = parseFloat(bal['ZAUD'] || bal['AUD'] || 0);
-      usdCash   = parseFloat(bal['ZUSD'] || bal['USD'] || 0);
+      // Log ALL balance keys so we can see exactly what Kraken returns
+      const allKeys = Object.entries(bal).filter(([,v]) => parseFloat(v) > 0);
+      console.log(`[BUY CHECK] Full Kraken balance: ${allKeys.map(([k,v]) => `${k}=${parseFloat(v).toFixed(4)}`).join(', ')}`);
+      audCash = parseFloat(bal['ZAUD'] || bal['AUD'] || bal['AUDX'] || 0);
+      usdCash = parseFloat(bal['ZUSD'] || bal['USD'] || 0);
     }
 
     const mode = botConfig.currencyMode || 'AUD';
