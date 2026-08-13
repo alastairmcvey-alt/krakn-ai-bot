@@ -491,7 +491,8 @@ let botConfig = {
   atrMultiplier:        2.0,
   breakEvenTriggerPct:  2.0,
   trailingTriggerPct:   4.0,
-  minHoldMinutes:       120,  // 2 hours minimum — was 60, giving trades more time to develop
+  minHoldMinutes:       120,  // 2 hours minimum — was 60
+  maxHoldHours:         120,  // 5 days max — exit even if no signal to free capital
   currencyMode:         'AUD',
   autoBuy:              false,
   autoBuyMaxAUD:        200,
@@ -4324,6 +4325,129 @@ app.get('/api/performance', requireAuth, async (req, res) => {
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
+// ── Backtester — replays historical candles through live signal engine ──
+app.post('/api/backtest', requireAuth, async (req, res) => {
+  try {
+    const {
+      pair            = 'XBTAUD',
+      interval        = 240,
+      confMin         = 65,
+      stopLossPct     = 3,
+      takeProfitPct   = 6,
+      maxHoldCandles  = 48,
+    } = req.body;
+
+    const raw = await krakenPublicRequest('OHLC', { pair, interval: parseInt(interval) });
+    const key = Object.keys(raw).find(k => k !== 'last');
+    const allCandles = raw[key];
+    if (!allCandles || allCandles.length < 60) return res.json({ success:false, error:'Not enough candle data' });
+
+    console.log(`[BACKTEST] ${pair} ${interval}m — ${allCandles.length} candles`);
+    const WARMUP = 50;
+    const trades = [];
+    let position  = null;
+
+    for (let i = WARMUP; i < allCandles.length - 1; i++) {
+      const window  = allCandles.slice(0, i + 1);
+      const closes  = window.map(c => parseFloat(c[4]));
+      const volumes = window.map(c => parseFloat(c[6]));
+      const price   = parseFloat(allCandles[i][4]);
+      const ts      = allCandles[i][0] * 1000;
+
+      const rsi  = calcRSI(closes);
+      const macd = calcMACD(closes);
+      const bb   = calcBollingerBands(closes);
+      const volS = calcVolumeSignal(volumes, closes);
+      const pats = detectCandlePatterns(window.slice(-10));
+      const patS = scorePatterns(pats);
+      const ma20 = closes.slice(-20).reduce((s,v) => s+v, 0) / 20;
+      const aboveMa20 = price > ma20;
+
+      // Exact same scoring as analyseTimeframe
+      let score = 0;
+      if (rsi < 30)       score += 2; else if (rsi < 45)  score += 1;
+      else if (rsi > 70)  score -= 2; else if (rsi > 55)  score -= 1;
+      if (macd.trend === 'BULLISH')          score += 1;
+      else if (macd.trend === 'BEARISH')     score -= 1;
+      if (bb.position === 'OVERSOLD')        score += 2;
+      else if (bb.position === 'LOWER_HALF') score += 1;
+      else if (bb.position === 'OVERBOUGHT') score -= 2;
+      else if (bb.position === 'UPPER_HALF') score -= 1;
+      if (volS === 'STRONG_BUY')   score += 2; else if (volS === 'BUY')    score += 1;
+      else if (volS === 'STRONG_SELL') score -= 2; else if (volS === 'SELL') score -= 1;
+      score += patS.score;
+
+      // Same confidence formula as computeSignalForPair
+      let confidence = 50, action = 'HOLD';
+      if (score >= 6)       { action='BUY';  confidence=Math.min(95, 60+(score/26)*45); }
+      else if (score <= -6) { action='SELL'; confidence=Math.min(95, 60+(Math.abs(score)/26)*45); }
+      else if (score >= 3)  { action='BUY';  confidence=Math.min(70, 50+(score/26)*35); }
+      else if (score <= -3) { action='SELL'; confidence=Math.min(70, 50+(Math.abs(score)/26)*35); }
+      if (action === 'BUY' && !aboveMa20) confidence = Math.max(0, confidence - 12);
+      if (action === 'BUY' && aboveMa20)  confidence = Math.min(99, confidence + 5);
+      if (rsi < 28) confidence = Math.min(99, confidence + 8);
+      else if (rsi < 33) confidence = Math.min(99, confidence + 4);
+
+      if (!position) {
+        if (action === 'BUY' && confidence >= confMin) {
+          position = { entryPrice:price, entryIdx:i, entryTs:ts, entryRsi:Math.round(rsi), entryConf:Math.round(confidence) };
+        }
+      } else {
+        const heldCandles = i - position.entryIdx;
+        const pnlPct      = ((price - position.entryPrice) / position.entryPrice) * 100;
+        let exitReason    = null;
+        if (pnlPct <= -stopLossPct)                              exitReason = 'stop-loss';
+        else if (takeProfitPct > 0 && pnlPct >= takeProfitPct)  exitReason = 'take-profit';
+        else if (heldCandles >= maxHoldCandles)                  exitReason = 'max-hold';
+        else if (action === 'SELL' && confidence >= 70)          exitReason = 'signal-sell';
+        if (exitReason) {
+          trades.push({ entryTs:position.entryTs, exitTs:ts, entryPrice:+position.entryPrice.toFixed(4),
+            exitPrice:+price.toFixed(4), pnlPct:+pnlPct.toFixed(2), won:pnlPct>0,
+            reason:exitReason, heldCandles, entryRsi:position.entryRsi, entryConf:position.entryConf });
+          position = null;
+        }
+      }
+    }
+
+    // Close any open position at last candle
+    if (position) {
+      const lp = parseFloat(allCandles[allCandles.length-1][4]);
+      const pp = ((lp - position.entryPrice) / position.entryPrice) * 100;
+      trades.push({ entryTs:position.entryTs, exitTs:allCandles[allCandles.length-1][0]*1000,
+        entryPrice:+position.entryPrice.toFixed(4), exitPrice:+lp.toFixed(4), pnlPct:+pp.toFixed(2),
+        won:pp>0, reason:'end-of-data', heldCandles:allCandles.length-1-position.entryIdx,
+        entryRsi:position.entryRsi, entryConf:position.entryConf });
+    }
+
+    const wins   = trades.filter(t => t.won);
+    const losses = trades.filter(t => !t.won);
+    const avgWin  = wins.length   ? wins.reduce((s,t)=>s+t.pnlPct,0)/wins.length : 0;
+    const avgLoss = losses.length ? losses.reduce((s,t)=>s+t.pnlPct,0)/losses.length : 0;
+    const pf      = losses.length && avgLoss !== 0 ? Math.abs(avgWin*wins.length/(avgLoss*losses.length)) : 0;
+    const maxDD   = trades.reduce((dd,t) => t.pnlPct < dd ? t.pnlPct : dd, 0);
+
+    let capital = 500;
+    const equity = [{ ts:allCandles[WARMUP][0]*1000, value:500 }];
+    trades.forEach(t => { capital *= (1+t.pnlPct/100); equity.push({ ts:t.exitTs, value:+capital.toFixed(2) }); });
+
+    res.json({ success:true, data: {
+      pair, interval, confMin, stopLossPct, takeProfitPct,
+      candleCount: allCandles.length,
+      startDate: new Date(allCandles[WARMUP][0]*1000).toISOString(),
+      endDate:   new Date(allCandles[allCandles.length-1][0]*1000).toISOString(),
+      stats: {
+        trades:trades.length, wins:wins.length, losses:losses.length,
+        winRate:+(trades.length?(wins.length/trades.length*100):0).toFixed(1),
+        totalPnlPct:+trades.reduce((s,t)=>s+t.pnlPct,0).toFixed(2),
+        avgWinPct:+avgWin.toFixed(2), avgLossPct:+avgLoss.toFixed(2),
+        profitFactor:+pf.toFixed(2), maxDrawdown:+maxDD.toFixed(2),
+        finalCapital:+capital.toFixed(2), startCapital:500,
+      },
+      equity, trades: trades.slice(-100),
+    }});
+  } catch(e) { console.error('[BACKTEST]', e.message); res.status(500).json({ success:false, error:e.message }); }
+});
+
 // ── Public performance page — no auth, safe to share ──────────
 app.get('/performance', async (req, res) => {
   try {
@@ -5029,6 +5153,29 @@ async function runAutoSellCheck() {
         }
       } // end stopLossEnabled
 
+      // ── Maximum hold time exit ────────────────────────────
+      // If held too long without hitting TP or SL, exit to free capital
+      // Default: 5 days (120 candles on 1H) — configurable
+      const maxHoldHours = botConfig.maxHoldHours || 120; // 5 days
+      const heldHours    = lastBuyTimes[holding.sym]
+        ? (Date.now() - lastBuyTimes[holding.sym]) / 3600000
+        : 0;
+      if (heldHours >= maxHoldHours && pnl.avgBuyPrice > 0) {
+        const gainPct = ((ticker.price - pnl.avgBuyPrice) / pnl.avgBuyPrice) * 100;
+        console.log(`[AUTO-SELL BOT] ${dp} max hold reached (${heldHours.toFixed(0)}h) — exiting at ${gainPct.toFixed(2)}%`);
+        await sendTelegram(
+          `⏰ <b>MAX HOLD TIME EXIT</b>\n\n` +
+          `<b>${dp}</b>\n` +
+          `Held: ${heldHours.toFixed(0)} hours (limit: ${maxHoldHours}h)\n` +
+          `Entry: ${fmtAUDServer(pnl.avgBuyPrice, holding.pair)}\n` +
+          `Exit: ${fmtAUDServer(ticker.price, holding.pair)}\n` +
+          `P&L: ${gainPct >= 0 ? '🟢 +' : '🔴 '}${gainPct.toFixed(2)}%\n\n` +
+          `Freeing capital for new opportunities.`
+        );
+        await executeSell(holding, ticker, 'max-hold', `Max hold ${maxHoldHours}h reached`, dp);
+        continue;
+      }
+
       // ── Multi-Indicator Signal ────────────────────────────
       const signal = await computeSignalForPair(holding.pair);
       botState.lastSignals[holding.pair] = {
@@ -5037,43 +5184,39 @@ async function runAutoSellCheck() {
         checkedAt: new Date().toISOString()
       };
 
-      console.log(`[AUTO-SELL BOT] ${dp} Score:${signal.weightedScore} ${signal.action} ${signal.confidence}%`);
+      console.log(`[AUTO-SELL BOT] ${dp} Score:${signal.weightedScore} ${signal.action} ${signal.confidence}% RSI:${signal.rsi} held:${heldHours.toFixed(0)}h`);
 
       if (signal.action !== 'SELL') continue;
 
-      // ── Sell quality filters ─────────────────────────────────
-      // Require higher confidence to sell than to buy
-      // This prevents selling on weak 15m noise
-      const sellConfidenceMin = Math.max(botConfig.confidenceMin + 10, 75);
+      // ── Sell quality filters ──────────────────────────────
+      // Lowered from 75% to 70% — was blocking all signal sells
+      const sellConfidenceMin = Math.max(botConfig.confidenceMin + 5, 70);
       if (signal.confidence < sellConfidenceMin) {
-        console.log(`[AUTO-SELL BOT] ${dp} skipped — sell confidence ${signal.confidence}% < ${sellConfidenceMin}% required`);
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — sell confidence ${signal.confidence}% < ${sellConfidenceMin}%`);
         continue;
       }
 
-      // Never sell when RSI is oversold (< 35) — that's a dip, not a trend reversal
-      // Oversold RSI means the market has already fallen hard and a bounce is likely
-      if (signal.rsi < 35) {
-        console.log(`[AUTO-SELL BOT] ${dp} skipped — RSI ${signal.rsi} oversold, holding for bounce`);
+      // Never sell when RSI extremely oversold — likely a bounce coming
+      // Lowered threshold from 35 to 28 — was blocking too many sells
+      if (signal.rsi < 28) {
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — RSI ${signal.rsi} extreme oversold, holding`);
         continue;
       }
 
-      // Require at least 2 timeframes to agree on SELL (not just 15m noise)
+      // Require at least 2 timeframes bearish
       const tfSells = [
         signal.timeframes?.['15m']?.score < -2,
         signal.timeframes?.['1h']?.score  < -2,
         signal.timeframes?.['4h']?.score  < -2,
       ].filter(Boolean).length;
       if (tfSells < 2) {
-        console.log(`[AUTO-SELL BOT] ${dp} skipped — only ${tfSells}/3 timeframes bearish (need 2+)`);
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — only ${tfSells}/3 timeframes bearish`);
         continue;
       }
 
-      // Don't signal-sell within 2 hours of buying — stop-loss handles emergencies
-      const heldMins = lastBuyTimes[holding.sym]
-        ? (Date.now() - lastBuyTimes[holding.sym]) / 60000
-        : 9999;
-      if (heldMins < 120) {
-        console.log(`[AUTO-SELL BOT] ${dp} skipped — only held ${heldMins.toFixed(0)} min, waiting 2h before signal sell`);
+      // Don't signal-sell within 2 hours of buying
+      if (heldHours < 2) {
+        console.log(`[AUTO-SELL BOT] ${dp} skipped — only held ${(heldHours*60).toFixed(0)} min`);
         continue;
       }
 
