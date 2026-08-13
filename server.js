@@ -705,7 +705,13 @@ function loadData() {
         }, 3 * 60 * 1000);
       }
       console.log(`[LOAD] ✅ Settings restored from ${src} — bot was ${data.botRunning ? 'ON (restarting)' : 'OFF'}`);
-      console.log(`[LOAD] risk=${botConfig.riskLevel} confidence=${botConfig.confidenceMin}% stopLoss=${botConfig.stopLossPct}%`);
+
+      // ── Sanity-check critical settings ───────────────────
+      // Fix bad saved values that may have crept in from old versions
+      if (botConfig.stopLossPct < 2)   { botConfig.stopLossPct = 3;   console.log('[LOAD] Fixed stopLossPct → 3%'); }
+      if (botConfig.confidenceMin > 80) { botConfig.confidenceMin = 65; console.log('[LOAD] Fixed confidenceMin → 65%'); }
+      if (advisorSettings.intervalHours < 4) { advisorSettings.intervalHours = 8; console.log('[LOAD] Fixed advisor interval → 8h'); }
+      console.log(`[LOAD] Active: risk=${botConfig.riskLevel} confidence=${botConfig.confidenceMin}% stopLoss=${botConfig.stopLossPct}%`);
       return; // success
     } catch(e) { console.warn(`[LOAD] Failed to read ${src}:`, e.message); }
   }
