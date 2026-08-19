@@ -4894,6 +4894,35 @@ app.post('/api/chart/telegram/:pair', requireAuth, async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// Signal endpoint for app dashboard — returns computed signal for a pair
+app.get('/api/signal/:pair', requireAuth, async (req, res) => {
+  try {
+    const pair   = req.params.pair;
+    const signal = await computeSignalForPair(pair);
+    res.json({ success:true, data: signal });
+  } catch(e) { res.status(500).json({ success:false, error:e.message }); }
+});
+
+// Post signal chart to Telegram
+app.post('/api/signal/telegram/:pair', requireAuth, async (req, res) => {
+  try {
+    const pair   = req.params.pair;
+    const signal = await computeSignalForPair(pair, { manualVision: true });
+    const dp     = PAIR_DISPLAY[pair] || pair;
+    const ticker = await fetchSingleTicker(pair);
+    const price  = fmtAUDServer(ticker?.price || 0, pair);
+    const emoji  = signal.action==='BUY'?'🟢':signal.action==='SELL'?'🔴':'🟡';
+    await sendTelegram(
+      `${emoji} <b>${dp} Signal (App Request)</b>\n\n` +
+      `Price: ${price}\n` +
+      `Action: <b>${signal.action}</b> ${signal.confidence}% confidence\n` +
+      `RSI: ${signal.rsi} | Score: ${signal.weightedScore?.toFixed(1)} | Regime: ${signal.regime}\n\n` +
+      (signal.signals?.slice(0,3).join('\n') || 'No signals')
+    );
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ success:false, error:e.message }); }
+});
+
 app.post('/api/signal/full', requireAuth, async (req, res) => {
   try {
     const { pair } = req.body;
