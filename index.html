@@ -345,7 +345,7 @@ function renderDashboard() {
           <path class="arc-fill" id="arcFill" d="M 20 85 A 60 60 0 0 1 140 85" stroke="var(--amber)"
             stroke-dasharray="188" stroke-dashoffset="188"/>
         </svg>
-        <div class="arc-center">
+        <div class="arc-center" onclick="loadSignal(currentPair)" style="cursor:pointer" title="Tap to refresh">
           <div class="arc-action HOLD" id="arcAction">--</div>
           <div class="arc-conf" id="arcConf">--%</div>
         </div>
@@ -363,7 +363,7 @@ function renderDashboard() {
             <div class="signal-stat-key">REGIME</div>
           </div>
         </div>
-        <div class="signal-reason" id="sigReason">Tap refresh to load AI signal</div>
+        <div class="signal-reason" id="sigReason" onclick="loadSignal(currentPair)" style="cursor:pointer">Tap to load AI signal</div>
       </div>
     </div>
 
@@ -420,15 +420,15 @@ async function loadSignal(pair) {
   const el = document.getElementById('sigReason');
   if (el) el.textContent = 'Fetching signal...';
   if (!serverOnline || !cfg.botToken) {
-    if (el) el.textContent = 'Connect server for AI signals';
+    updateArc({ action:'HOLD', confidence:0, rsi:'--', weightedScore:0, regime:'--', signals:[] });
+    if (el) el.textContent = 'Connect server in Settings for AI signals';
     return;
   }
   try {
     const r = await api(`/api/signal/${pair}`);
-    const s = r.data;
-    updateArc(s);
-  } catch {
-    if (el) el.textContent = 'Signal unavailable — try again';
+    if (r?.data) updateArc(r.data);
+  } catch(e) {
+    if (el) el.textContent = 'Tap here to refresh signal';
   }
 }
 
