@@ -509,16 +509,16 @@ let botConfig = {
     breakEven:     true,   // break-even stop triggered
     profitLocked:  true,   // trailing stop / profit locked in
 
-    // Digest alerts — batched and sent at the interval below
-    // Options: 'off' | '4h' | '8h' | 'daily'
-    volumeAlerts:  '4h',   // volume anomaly alerts
-    smartMoney:    '8h',   // smart money wallet activity
-    macroEvents:   '4h',   // upcoming economic events
-    advisor:       'daily',// AI advisor market analysis
-    learning:      'daily',// learning engine weight updates
-    waitlist:      '8h',   // new waitlist signups
-    gridUpdates:   'off',  // grid trading order fills
-    rebalance:     'daily',// portfolio rebalance alerts
+    // Everything non-critical → daily portfolio digest
+    // Individual category digests replaced by one personalised daily summary
+    volumeAlerts:  'off',   // folded into daily digest
+    smartMoney:    'daily', // only truly significant moves
+    macroEvents:   'off',   // folded into daily digest
+    advisor:       'off',   // replaced by daily portfolio digest
+    learning:      'daily', // weight updates once a day is enough
+    waitlist:      'daily', // signups batched
+    gridUpdates:   'off',
+    rebalance:     'off',
   },
 
   // ── API Cost Controls ─────────────────────────────────────
@@ -590,6 +590,130 @@ async function flushDigestQueues() {
   }
 }
 setInterval(flushDigestQueues, 30 * 60 * 1000); // check every 30 mins
+
+// ─── Daily Portfolio Digest ────────────────────────────────────
+// Fires once per day at 8am Sydney time
+// Personal summary of YOUR portfolio — not generic market noise
+async function sendDailyPortfolioDigest() {
+  try {
+    const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'full', timeStyle:'short' });
+
+    // 1. Get live balances and prices
+    let audCash = 0, holdings = [];
+    try {
+      const bal = await krakenPrivateRequest('Balance');
+      audCash   = parseFloat(bal['ZAUD'] || bal['AUD'] || bal['RAUD'] || 0);
+
+      for (const [asset, qty] of Object.entries(bal)) {
+        const q = parseFloat(qty);
+        if (q < 0.00001) continue;
+        if (asset === 'ZAUD' || asset === 'AUD' || asset === 'RAUD') continue;
+        const sym      = asset.replace(/^X/,'').replace(/Z$/,'').replace('XBT','BTC');
+        const audPair  = USD_TO_AUD_MAP ? (Object.entries(USD_TO_AUD_MAP).find(([k]) => k.includes(sym))?.[1]) : null;
+        const pair     = audPair || (sym + 'AUD');
+        const ticker   = await fetchSingleTicker(pair).catch(() => null);
+        if (!ticker) continue;
+        const valueAUD = q * ticker.price;
+        if (valueAUD < 1) continue;
+        const pnlData  = pnlByAsset[sym];
+        const avgBuy   = pnlData?.avgBuyPrice || 0;
+        const unrealPct = avgBuy > 0 ? ((ticker.price - avgBuy) / avgBuy * 100) : null;
+        const heldHours = lastBuyTimes[sym] ? (Date.now() - lastBuyTimes[sym]) / 3600000 : null;
+        holdings.push({ sym, qty: q, price: ticker.price, valueAUD, avgBuy, unrealPct, pair, heldHours });
+      }
+    } catch(e) { console.warn('[DAILY DIGEST] Balance fetch failed:', e.message); }
+
+    // 2. P&L summary from trade outcomes (last 7 days)
+    const weekAgo    = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const weekTrades = tradeOutcomes.filter(t => new Date(t.timestamp).getTime() > weekAgo);
+    const weekWins   = weekTrades.filter(t => t.won).length;
+    const weekPnl    = weekTrades.reduce((s,t) => s+t.pnlAUD, 0);
+    const allRealised = Object.values(pnlByAsset).reduce((s,a) => s+(a.realisedPnl||0), 0);
+
+    // 3. Portfolio total
+    const totalInvested = holdings.reduce((s,h) => s+h.valueAUD, 0);
+    const totalValue    = totalInvested + audCash;
+
+    // 4. Build holdings section
+    const holdingsLines = holdings.map(h => {
+      const pnlStr = h.unrealPct !== null
+        ? ` (${h.unrealPct >= 0 ? '🟢 +' : '🔴 '}${h.unrealPct.toFixed(1)}%)`
+        : '';
+      const heldStr = h.heldHours
+        ? ` · held ${h.heldHours < 24 ? h.heldHours.toFixed(0)+'h' : (h.heldHours/24).toFixed(1)+'d'}`
+        : '';
+      return `• <b>${h.sym}</b> — A$${Math.round(h.valueAUD).toLocaleString()}${pnlStr}${heldStr}`;
+    }).join('\n') || '• No open positions';
+
+    // 5. What the bot is watching
+    const watchPairs   = getActivePairs(botConfig.currencyMode).slice(0, 5);
+    const watchSignals = [];
+    for (const pair of watchPairs) {
+      try {
+        const ticker = await fetchSingleTicker(pair);
+        if (!ticker) continue;
+        const sym    = PAIR_DISPLAY[pair] || pair;
+        const chg    = ticker.change24h >= 0 ? `+${ticker.change24h}%` : `${ticker.change24h}%`;
+        watchSignals.push(`• ${sym} — ${fmtAUDServer(ticker.price, pair)} (${chg})`);
+      } catch {}
+    }
+
+    // 6. Bot status
+    const botRunning  = botState.running;
+    const tradesCount = tradeOutcomes.length;
+    const winRate     = tradesCount > 0
+      ? Math.round(tradeOutcomes.filter(t=>t.won).length / tradesCount * 100)
+      : 0;
+
+    await sendTelegram(
+      `📊 <b>KRAKN·AI Daily Portfolio Summary</b>\n` +
+      `${sydneyTime}\n\n` +
+
+      `💼 <b>Portfolio</b>\n` +
+      `Total value: <b>A$${Math.round(totalValue).toLocaleString()}</b>\n` +
+      `Cash available: A$${audCash.toFixed(2)}\n` +
+      `All-time realised P&L: ${allRealised >= 0 ? '🟢 +' : '🔴 '}A$${Math.abs(allRealised).toFixed(2)}\n\n` +
+
+      `📈 <b>Open Positions (${holdings.length})</b>\n` +
+      `${holdingsLines}\n\n` +
+
+      (weekTrades.length > 0 ?
+      `⚡ <b>Last 7 Days</b>\n` +
+      `${weekTrades.length} trades · ${weekWins} wins · ${weekPnl >= 0 ? '+' : ''}A$${weekPnl.toFixed(2)} P&L\n\n` : '') +
+
+      `🌐 <b>Market Prices</b>\n` +
+      `${watchSignals.join('\n')}\n\n` +
+
+      `🤖 <b>Bot Status</b>\n` +
+      `${botRunning ? '🟢 Running' : '⏸ Paused'} · ${botConfig.confidenceMin}% threshold · ${botConfig.stopLossPct}% stop\n` +
+      `${tradesCount} total trades · ${winRate}% win rate\n\n` +
+
+      `💡 Reply <b>Any signals?</b> for a live scan`
+    );
+
+    console.log('[DAILY DIGEST] Portfolio digest sent');
+  } catch(e) {
+    console.error('[DAILY DIGEST]', e.message);
+  }
+}
+
+// Schedule daily digest at 8am Sydney time
+function scheduleDailyDigest() {
+  function msUntil8amSydney() {
+    const now    = new Date();
+    const sydney = new Date(now.toLocaleString('en-US', { timeZone:'Australia/Sydney' }));
+    const next8am = new Date(sydney);
+    next8am.setHours(8, 0, 0, 0);
+    if (next8am <= sydney) next8am.setDate(next8am.getDate() + 1);
+    return next8am - sydney;
+  }
+  const ms = msUntil8amSydney();
+  console.log(`[DAILY DIGEST] First digest in ${(ms/3600000).toFixed(1)}h (8am Sydney)`);
+  setTimeout(() => {
+    sendDailyPortfolioDigest();
+    setInterval(sendDailyPortfolioDigest, 24 * 60 * 60 * 1000); // then every 24h
+  }, ms);
+}
 
 // ─── Portfolio History ─────────────────────────────────────────
 let portfolioHistory = []; // [{ date, valueAUD, timestamp }]
@@ -2483,6 +2607,16 @@ async function handleTelegramMessage(chatId, userMessage, username) {
   if (msg === 'run analysis' || msg === '/analysis' || msg === 'analyse' || msg === 'analyze') {
     await sendTelegramTo(chatId, '⏳ Running full market analysis... give me 30 seconds!');
     await runAdvisor();
+    return;
+  }
+
+  // ── Portfolio digest command ────────────────────────────────
+  const digestPhrases = ['portfolio', 'my portfolio', 'how am i doing', 'daily summary',
+    'daily digest', 'summary', 'portfolio summary', 'show me my portfolio', '/portfolio', '/digest'];
+
+  if (digestPhrases.some(p => msg.includes(p))) {
+    await sendTelegramTo(chatId, '📊 Building your portfolio summary...');
+    await sendDailyPortfolioDigest();
     return;
   }
 
@@ -4950,6 +5084,12 @@ app.post('/api/notifications/settings', requireAuth, (req, res) => {
   res.json({ success:true, data: { notifications: botConfig.notifications, api: botConfig.api } });
 });
 
+// Manually trigger daily portfolio digest
+app.post('/api/digest/daily', requireAuth, async (req, res) => {
+  res.json({ success:true, message:'Sending daily digest to Telegram...' });
+  await sendDailyPortfolioDigest();
+});
+
 // Force flush digest queues on demand
 app.post('/api/notifications/flush', requireAuth, async (req, res) => {
   res.json({ success:true, message:'Flushing digest queues...' });
@@ -6041,6 +6181,7 @@ app.listen(PORT, async () => {
   scheduleAdvisor();
   scheduleBuyCheck();
   scheduleDCA();
+  scheduleDailyDigest(); // 8am Sydney daily portfolio summary
 
   setInterval(async () => { try { await checkVolumeAnomalies();   } catch(e) { console.error('[VOLUME]', e.message); } }, 15 * 60 * 1000);
   setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART]', e.message);  } }, 6 * 60 * 60 * 1000); // 6h (was 15min — huge cost saving)
