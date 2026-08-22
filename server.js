@@ -800,6 +800,25 @@ function loadData() {
       const data = JSON.parse(fs.readFileSync(src, 'utf8'));
       if (data.advisorSettings) Object.assign(advisorSettings, data.advisorSettings);
       if (data.botConfig)       Object.assign(botConfig,       data.botConfig);
+
+      // Always force-reset notification settings — saved file may have old 4h/8h values
+      // These are code-controlled, not user-controlled, so always use current defaults
+      botConfig.notifications = {
+        buys:         true,
+        sells:        true,
+        errors:       true,
+        breakEven:    true,
+        profitLocked: true,
+        volumeAlerts: 'off',
+        smartMoney:   'daily',
+        macroEvents:  'off',
+        advisor:      'off',
+        learning:     'daily',
+        waitlist:     'daily',
+        gridUpdates:  'off',
+        rebalance:    'off',
+      };
+      console.log('[LOAD] Notification settings reset to daily digest mode');
       if (data.dcaConfig)       Object.assign(dcaConfig,       data.dcaConfig);
       if (data.priceAlerts)     priceAlerts   = data.priceAlerts;
       if (data.tradeLog)        tradeLog      = data.tradeLog;
@@ -3674,14 +3693,14 @@ async function checkSmartMoneySignals() {
         `Urgency: ${interpretation.urgency} | ${freshTxs.length} transactions in last 2h\n` +
         `⏰ ${new Date().toLocaleString('en-AU', {timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short'})} AEST`;
 
-      // HIGH urgency smart money always fires immediately (potential trade opportunity)
-      // MEDIUM and LOW go to digest queue
-      if (interpretation.urgency === 'HIGH') {
+      // All smart money goes to daily digest — only exception is >90% confidence
+      // which suggests an imminent major move worth knowing about immediately
+      if (interpretation.urgency === 'HIGH' && interpretation.confidence >= 90) {
         await sendTelegram(msg);
       } else {
         queueNotification('smartMoney',
           `${wallet.label}: ${interpretation.action} ${interpretation.coin}`,
-          `Confidence: ${interpretation.confidence}% | ${interpretation.urgency} urgency\n${interpretation.reasoning?.slice(0,100)}`
+          `Confidence: ${interpretation.confidence}% | ${interpretation.urgency}\n${interpretation.reasoning?.slice(0,100)}`
         );
       }
 
