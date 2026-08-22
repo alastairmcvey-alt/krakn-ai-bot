@@ -2297,11 +2297,36 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       return false;
     }
 
-    // Position sizing by conviction
-    const posMultiplier = bestOpportunity.signal?.positionSizeMultiplier || 1.0;
-    const baseSizeAUD   = Math.min(cashForPair * 0.25, cashForPair - 10);
-    const suggestedAUD  = Math.max(10, Math.min(baseSizeAUD * posMultiplier, cashForPair * 0.40));
-    console.log(`[BUY CHECK] ${bestOpportunity.displayPair} — cash: ${cashForPair.toFixed(2)}, size: ${suggestedAUD.toFixed(2)}, posMultiplier: ${posMultiplier}`);
+    // ── IMPROVEMENT 1: Fear & Greed Entry Filter ──────────────
+    // Only enter when market is in fear — that's where XRP +42% and ADA +30% came from
+    // Skip buys when market is greedy (>60) — buying into strength has lower win rate
+    const fg = await fetchFearGreed();
+    const fgValue = fg?.value || 50;
+    if (fgValue > 60 && !manualTrigger) {
+      console.log(`[BUY CHECK] Fear & Greed ${fgValue} — market too greedy, waiting for fear (<60) to enter`);
+      return false;
+    }
+    if (fgValue < 20) {
+      console.log(`[BUY CHECK] Fear & Greed ${fgValue} — EXTREME FEAR — highest quality entry zone`);
+    } else if (fgValue < 35) {
+      console.log(`[BUY CHECK] Fear & Greed ${fgValue} — fear zone — good entry conditions`);
+    }
+
+    // ── IMPROVEMENT 2: Compound Position Sizing ───────────────
+    // As portfolio grows, position sizes grow with it
+    // Base is 25% of available cash — same as before
+    // BUT now scales up to 35% when Fear & Greed is extreme fear (<25)
+    // and confidence is very high (85%+) — maximise best opportunities
+    const conf           = bestOpportunity.confidence;
+    const posMultiplier  = bestOpportunity.signal?.positionSizeMultiplier || 1.0;
+    const fearBoost      = fgValue < 25 ? 1.4 : fgValue < 35 ? 1.2 : 1.0; // bigger bet in extreme fear
+    const confBoost      = conf >= 85 ? 1.2 : 1.0;                          // bigger bet on high conviction
+    const sizeMultiplier = Math.min(posMultiplier * fearBoost * confBoost, 2.0); // cap at 2x
+    const maxPct         = Math.min(0.25 * sizeMultiplier, 0.40);            // never more than 40%
+    const baseSizeAUD    = Math.min(cashForPair * maxPct, cashForPair - 10);
+    const suggestedAUD   = Math.max(10, baseSizeAUD);
+
+    console.log(`[BUY CHECK] Size: A$${suggestedAUD.toFixed(2)} | FG:${fgValue} fearBoost:${fearBoost}x confBoost:${confBoost}x conf:${conf}%`);
 
     const volume   = (suggestedAUD / bestOpportunity.price).toFixed(8);
     const topPat   = bestOpportunity.patterns[0];
@@ -2395,6 +2420,7 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
         timestamp:   Date.now(),
       };
 
+      const fgStr2 = fgValue ? `Fear & Greed: ${fgValue}/100 ${fgValue < 25 ? '😱 Extreme Fear — prime entry' : fgValue < 35 ? '😨 Fear — good entry' : '😐 Neutral'}\n` : '';
       const autoBuyNote = botConfig.autoBuy
         ? `\n⚠️ Auto-buy active but confidence (${bestOpportunity.confidence}%) below threshold (${botConfig.autoBuyMinConfidence}%) — manual prompt sent`
         : '';
@@ -2405,9 +2431,10 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
         `Price: ${fmtAUDServer(bestOpportunity.price, bestOpportunity.pair)}\n` +
         `RSI: ${bestOpportunity.rsi} | Score: ${bestOpportunity.weightedScore} | Confidence: ${bestOpportunity.confidence}%\n` +
         `24h Change: ${bestOpportunity.change24h > 0 ? '+' : ''}${bestOpportunity.change24h}%\n` +
+        `${fgStr2}` +
         `High: ${fmtAUDServer(bestOpportunity.high, bestOpportunity.pair)} | Low: ${fmtAUDServer(bestOpportunity.low, bestOpportunity.pair)}` +
         `${patStr}${sentStr}${visStr}\n\n` +
-        `💰 Suggested: <b>${fmtAUDServer(suggestedAUD, bestOpportunity.pair)}</b> (25% of your ${pairCurr} cash)\n` +
+        `💰 Suggested: <b>${fmtAUDServer(suggestedAUD, bestOpportunity.pair)}</b> (${(maxPct*100).toFixed(0)}% of cash${fearBoost > 1 ? ` · fear boost ${fearBoost}x` : ''}${confBoost > 1 ? ` · conviction boost ${confBoost}x` : ''})\n` +
         `= ${volume} ${bestOpportunity.sym}\n\n` +
         `Reply <b>YES</b> to buy now or <b>NO</b> to skip.\n` +
         `⏰ Expires in 10 minutes — ${sydneyTime} AEST${autoBuyNote}`
@@ -5242,6 +5269,20 @@ async function runAutoSellCheck() {
           }
         }
 
+        // ── IMPROVEMENT 3: Wider trail on high-conviction winners ──
+        // Standard trail: 2-3% — locks in profit but cuts winners short
+        // High conviction (85%+ entry confidence) trail: 5% — lets big moves run
+        // This is how XRP +42% could have been XRP +60% with room to breathe
+        const entrySignal    = botState.lastSignals?.[holding.pair];
+        const entryConf      = entrySignal?.confidence || 70;
+        const breakEvenTrig  = botConfig.breakEvenTriggerPct || 2.0;
+        const trailingTrig   = entryConf >= 85
+          ? Math.max(botConfig.trailingTriggerPct || 4.0, 6.0)  // high conviction: trail activates at +6%
+          : botConfig.trailingTriggerPct || 4.0;                 // normal: trail activates at +4%
+        const trailWidth     = entryConf >= 85
+          ? Math.max(effectiveStopPct, 5.0)   // high conviction: 5% trail minimum
+          : effectiveStopPct;                  // normal: ATR-based trail
+
         // Track peak price for trailing stop
         if (!stopLossPeaks[holding.sym] || ticker.price > stopLossPeaks[holding.sym]) {
           stopLossPeaks[holding.sym] = ticker.price;
@@ -5272,14 +5313,14 @@ async function runAutoSellCheck() {
         //   from the peak, we sell and bank the gain.
         // ══════════════════════════════════════════════════════
 
-        const breakEvenTrigger = botConfig.breakEvenTriggerPct || 2.0; // move stop to entry after +2%
-        const trailingTrigger  = botConfig.trailingTriggerPct  || 4.0; // activate trailing stop after +4%
+        const breakEvenTrigger = breakEvenTrig;  // from high-conviction calc above
+        const trailingTrigger  = trailingTrig;   // wider for 85%+ confidence entries
 
         if (entryPrice > 0) {
 
           if (gainFromEntry >= trailingTrigger) {
             // ── STAGE 3: Profit protection — trailing stop ──────
-            if (dropFromPeak <= -effectiveStopPct) {
+            if (dropFromPeak <= -trailWidth) {
               const profitLocked = ((currentPrice - entryPrice) / entryPrice) * 100;
               console.log(`[TRAILING STOP] ${dp} triggered — ${dropFromPeak.toFixed(1)}% from peak, locking in +${profitLocked.toFixed(1)}%`);
               await sendTelegram(
@@ -5288,7 +5329,7 @@ async function runAutoSellCheck() {
                 `Entry: ${fmtAUDServer(entryPrice, holding.pair)}\n` +
                 `Peak: ${fmtAUDServer(peakPrice, holding.pair)}\n` +
                 `Exit: ${fmtAUDServer(currentPrice, holding.pair)}\n` +
-                `Drop from peak: ${dropFromPeak.toFixed(1)}% (ATR limit: -${effectiveStopPct}%)\n\n` +
+                `Drop from peak: ${dropFromPeak.toFixed(1)}% (Trail: -${trailWidth.toFixed(1)}%)\n\n` +
                 `💰 <b>Net gain on this trade: +${profitLocked.toFixed(2)}%</b>\n` +
                 `💵 ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)} profit banked\n\n` +
                 `✅ Break-even stop protected you from giving this back`
@@ -5297,7 +5338,7 @@ async function runAutoSellCheck() {
               await executeSell(holding, ticker, 'trailing-stop', `Trailing stop: locked in +${profitLocked.toFixed(1)}%`, dp);
               continue;
             } else {
-              console.log(`[STAGE 3] ${dp} profit zone — peak ${fmtAUDServer(peakPrice, holding.pair)}, trailing ${effectiveStopPct}% below`);
+              console.log(`[STAGE 3] ${dp} profit zone — peak ${fmtAUDServer(peakPrice, holding.pair)}, trailing ${trailWidth.toFixed(1)}% below (${entryConf >= 85 ? "high conviction" : "standard"})`);
             }
 
           } else if (gainFromEntry >= breakEvenTrigger) {
@@ -5335,7 +5376,7 @@ async function runAutoSellCheck() {
                 `<b>${dp}</b>\n` +
                 `Entry: ${fmtAUDServer(entryPrice, holding.pair)}\n` +
                 `Current: ${fmtAUDServer(currentPrice, holding.pair)}\n` +
-                `Loss: <b>${dropFromEntry.toFixed(1)}%</b> (ATR limit: -${effectiveStopPct}%)\n` +
+                `Loss: <b>${dropFromEntry.toFixed(1)}%</b> (Trail: -${trailWidth.toFixed(1)}%)\n` +
                 `Unrealised: ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)}\n\n` +
                 `⏳ Cutting loss to protect remaining capital...`
               );
