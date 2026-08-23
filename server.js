@@ -2186,8 +2186,10 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
       // Log ALL balance keys so we can see exactly what Kraken returns
       const allKeys = Object.entries(bal).filter(([,v]) => parseFloat(v) > 0);
       console.log(`[BUY CHECK] Full Kraken balance: ${allKeys.map(([k,v]) => `${k}=${parseFloat(v).toFixed(4)}`).join(', ')}`);
-      audCash = parseFloat(bal['ZAUD'] || bal['AUD'] || bal['AUDX'] || 0);
-      usdCash = parseFloat(bal['ZUSD'] || bal['USD'] || 0);
+      // ZAUD = regular AUD cash (spendable for trading)
+      // AUDX = Kraken Earn tokenised AUD (NOT directly tradeable — don't include in trading cash)
+      audCash = parseFloat(bal['ZAUD'] || 0) + parseFloat(bal['AUD'] || 0);
+      usdCash = parseFloat(bal['ZUSD'] || 0) + parseFloat(bal['USD'] || 0);
     }
 
     const mode = botConfig.currencyMode || 'AUD';
