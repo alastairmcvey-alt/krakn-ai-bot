@@ -630,62 +630,114 @@ async function fetchOnChain() {
   } catch { el.textContent = 'On-chain data unavailable'; }
 }
 
-// ── Trade Tab ──────────────────────────────────────────────────
 // ── Portfolio Tab ──────────────────────────────────────────────
 function renderPortfolio() {
   const d = document.getElementById('content');
   const entries = Object.entries(balance).filter(([,v])=>parseFloat(v)>0.000001);
 
-  let totalAUD = 0;
-  const holdings = entries.map(([asset, qty]) => {
-    const sym = asset.replace(/^X/,'').replace(/Z$/,'').replace('XBT','BTC');
-    const priceKey = Object.keys(prices).find(k=>k.includes(sym==='USD'?'ZUSD':sym));
-    const pr = priceKey ? (prices[priceKey]?.price||0) : (asset==='ZUSD'||asset==='AUD'||asset==='ZAUD'?1:0);
-    const val = parseFloat(qty) * pr;
-    const chg = priceKey ? parseFloat(prices[priceKey]?.change24h||0) : 0;
-    totalAUD += val;
-    return { sym, qty:parseFloat(qty), val, pr, chg, asset };
-  }).filter(h=>h.val>0.5).sort((a,b)=>b.val-a.val);
+  // Kraken asset key normalisation
+  // ZAUD + AUDX = AUD cash, XXBT = BTC, XETH = ETH, etc
+  const AUD_CASH_KEYS = ['ZAUD','AUDX','AUD'];
+  const USD_CASH_KEYS = ['ZUSD','USD'];
 
-  const realisedPnl  = 0; // Would need server data
-  const hasBalance   = entries.length>0 && serverOnline && cfg.botToken;
+  let totalAUD = 0;
+  let audCashTotal = 0;
+
+  const holdings = [];
+
+  for (const [asset, qty] of entries) {
+    const q = parseFloat(qty);
+    if (q < 0.000001) continue;
+
+    // AUD cash — only ZAUD is directly tradeable
+    // AUDX is Kraken Earn (tokenised AUD) — show separately, not as trading cash
+    if (asset === 'ZAUD' || asset === 'AUD') {
+      audCashTotal += q;
+      totalAUD     += q;
+      continue;
+    }
+    // AUDX — Kraken Earn, show as holding not cash
+    if (asset === 'AUDX') {
+      totalAUD += q; // A$1 each
+      holdings.push({ sym:'AUDX', qty:q, val:q, pr:1, chg:0, asset, label:'Kraken Earn' });
+      continue;
+    }
+    // USD cash — skip display (small amounts)
+    if (USD_CASH_KEYS.includes(asset)) continue;
+    // Skip dust USDC
+    if (asset === 'USDC' && q < 1) continue;
+
+    // Normalise symbol — Kraken prefixes X for crypto, Z for fiat
+    const sym = asset
+      .replace(/^XX/,'')   // XXBT → XBT → BTC below
+      .replace(/^X/,'')    // XETH → ETH
+      .replace(/^Z/,'')    // ZAUD → AUD (handled above)
+      .replace('XBT','BTC');
+
+    // Find AUD price pair
+    const pairKey = Object.keys(prices).find(k =>
+      k === sym+'AUD' || k === 'X'+sym+'ZAUD' || k.includes(sym+'AUD')
+    );
+    const pr  = pairKey ? (prices[pairKey]?.price || 0) : 0;
+    const val = q * pr;
+    if (val < 0.50) continue; // skip dust
+
+    const chg = pairKey ? parseFloat(prices[pairKey]?.change24h || 0) : 0;
+    totalAUD += val;
+    holdings.push({ sym, qty:q, val, pr, chg, asset });
+  }
+
+  holdings.sort((a,b) => b.val - a.val);
+  const hasBalance = entries.length > 0 && serverOnline && cfg.botToken;
 
   d.innerHTML = `<div class="port-wrap fade-in">
     <div class="port-hero">
       <div style="font-family:var(--font-data);font-size:11px;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:8px">Portfolio Value</div>
       <div class="port-total">${hasBalance ? 'A$'+Math.round(totalAUD).toLocaleString() : 'A$---'}</div>
-      <div class="port-sub">${hasBalance ? 'Live from Kraken' : 'Connect server to see live balance'}</div>
+      <div class="port-sub">${hasBalance ? 'Cash: A$'+Math.round(audCashTotal).toLocaleString()+' · Live from Kraken' : 'Connect server to see live balance'}</div>
     </div>
     <div class="port-stats">
       <div class="port-stat">
-        <div class="port-stat-val" style="color:var(--green)">+A$0.00</div>
-        <div class="port-stat-key">Today's P&L</div>
+        <div class="port-stat-val" style="color:var(--cyan)">A$${Math.round(audCashTotal).toLocaleString()}</div>
+        <div class="port-stat-key">Available Cash</div>
       </div>
       <div class="port-stat">
         <div class="port-stat-val">${holdings.length}</div>
         <div class="port-stat-key">Positions</div>
       </div>
       <div class="port-stat">
-        <div class="port-stat-val" style="color:var(--cyan)" onclick="showTab('settings')" style="cursor:pointer">Settings</div>
-        <div class="port-stat-key">Connect →</div>
+        <div class="port-stat-val" style="color:var(--cyan);cursor:pointer" onclick="showTab('settings')">View →</div>
+        <div class="port-stat-key">Performance</div>
       </div>
     </div>
     <div class="holdings-list">
       ${holdings.length > 0 ? holdings.map(h => `
-        <div class="holding">
+        <div class="holding" onclick="selectPair('${h.sym==='BTC'?'XBTAUD':h.sym+'AUD'}');showTab('dashboard')">
           <div class="holding-icon" style="background:${COLORS[h.sym]||'#334155'}22;color:${COLORS[h.sym]||'#94A3B8'}">${h.sym.slice(0,1)}</div>
           <div class="holding-info">
-            <div class="holding-name">${h.sym}</div>
-            <div class="holding-qty">${h.qty.toFixed(h.qty<1?6:4)} ${h.sym}</div>
+            <div class="holding-name">${h.sym} ${h.label ? `<span style="font-size:10px;color:var(--muted);font-family:var(--font-data)">${h.label}</span>` : ''}</div>
+            <div class="holding-qty">${h.qty < 1 ? h.qty.toFixed(6) : h.qty.toFixed(4)} ${h.sym} · ${h.sym==='AUDX'?'A$1.00 each':'A$'+(h.pr >= 1000 ? Math.round(h.pr).toLocaleString() : h.pr.toFixed(4))}</div>
           </div>
           <div class="holding-right">
             <div class="holding-val">A$${Math.round(h.val).toLocaleString()}</div>
             <div class="holding-pct ${h.chg>=0?'up':'down'}">${h.chg>=0?'+':''}${h.chg.toFixed(2)}%</div>
           </div>
-        </div>`).join('') : `
-        <div style="padding:40px 0;text-align:center;color:var(--muted);font-size:13px">
-          ${hasBalance ? 'No holdings found' : 'Go to Settings → enter server URL and token'}
+        </div>`).join('')
+      : `<div style="padding:40px 0;text-align:center;color:var(--muted);font-size:13px">
+          ${hasBalance ? 'No crypto holdings — cash ready to deploy' : 'Go to Settings → enter server URL and token'}
         </div>`}
+      ${audCashTotal > 0 ? `
+        <div class="holding">
+          <div class="holding-icon" style="background:rgba(0,200,255,0.1);color:var(--cyan)">$</div>
+          <div class="holding-info">
+            <div class="holding-name">AUD Cash</div>
+            <div class="holding-qty">Available to trade</div>
+          </div>
+          <div class="holding-right">
+            <div class="holding-val">A$${Math.round(audCashTotal).toLocaleString()}</div>
+            <div class="holding-pct" style="color:var(--muted)">cash</div>
+          </div>
+        </div>` : ''}
     </div>
   </div>`;
 }
