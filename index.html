@@ -63,6 +63,14 @@ html, body { height:100%; overflow:hidden; background:var(--void); color:var(--t
 .coin-chip .chg.up { color:var(--green); }
 .coin-chip .chg.down { color:var(--red); }
 
+/* ─── Market Mode Toggle ─── */
+.market-toggle { display:flex; gap:6px; padding:0 20px 0; margin-bottom:0; }
+.mkt-btn { flex:1; padding:7px; text-align:center; background:var(--surface); border:1px solid var(--border);
+  border-radius:10px; font-family:var(--font-data); font-size:10px; letter-spacing:0.08em;
+  color:var(--muted); cursor:pointer; transition:all 0.2s; }
+.mkt-btn.active { background:rgba(0,200,255,0.12); border-color:rgba(0,200,255,0.4); color:var(--cyan); }
+.mkt-btn.stocks.active { background:rgba(118,185,0,0.12); border-color:rgba(118,185,0,0.4); color:#76B900; }
+
 /* ─── Signal Arc (signature element) ─── */
 .signal-block { padding:0 20px 16px; }
 .signal-arc-wrap { position:relative; width:100%; display:flex; flex-direction:column; align-items:center; padding:24px 0 16px; background:var(--surface); border:1px solid var(--border); border-radius:16px; margin-bottom:12px; }
@@ -243,6 +251,11 @@ const cfg = {
 };
 
 const PAIRS = ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','LINKAUD'];
+const STOCKS = ['AAPL','NVDA','MSFT','TSLA','GOOGL','AMZN','META','SPY','QQQ'];
+const STOCK_COLORS = { AAPL:'#555555', NVDA:'#76B900', MSFT:'#00A4EF', TSLA:'#CC0000',
+  GOOGL:'#4285F4', AMZN:'#FF9900', META:'#0082FB', SPY:'#1A6B3C', QQQ:'#9B30FF' };
+let marketMode = 'crypto'; // 'crypto' or 'stocks'
+let stockPrices = {}; // { AAPL: { price, change24h } }
 const DISP  = { XBTAUD:'BTC/AUD', ETHAUD:'ETH/AUD', SOLAUD:'SOL/AUD', XRPAUD:'XRP/AUD', ADAAUD:'ADA/AUD', LTCAUD:'LTC/AUD', LINKAUD:'LINK/AUD' };
 const SYMS  = { XBTAUD:'BTC', ETHAUD:'ETH', SOLAUD:'SOL', XRPAUD:'XRP', ADAAUD:'ADA', LTCAUD:'LTC', LINKAUD:'LINK' };
 const COLORS = { BTC:'#F7931A', ETH:'#627EEA', SOL:'#9945FF', XRP:'#346AA9', ADA:'#0D9488', LTC:'#BFBBBB', LINK:'#2A5ADA' };
@@ -389,6 +402,7 @@ function renderDashboard() {
 }
 
 function getPair(pair) {
+  if (marketMode === 'stocks') return stockPrices[pair] || null;
   for (const [k,v] of Object.entries(prices)) {
     if (k === pair || k.includes(pair.replace('AUD','')) || DISP[pair]===DISP[k]) return v;
   }
@@ -396,11 +410,36 @@ function getPair(pair) {
 }
 
 function fmtPrice(p, pair) {
-  const sym = pair?.endsWith('USD') ? 'US$' : 'A$';
+  const sym = (marketMode==='stocks' || pair?.endsWith('USD')) ? 'US$' : 'A$';
   if (!p) return `${sym}--`;
   if (p >= 1000) return sym + Math.round(p).toLocaleString('en-AU');
   if (p >= 1)    return sym + parseFloat(p).toFixed(2);
   return sym + parseFloat(p).toFixed(4);
+}
+
+function setMarketMode(mode) {
+  marketMode = mode;
+  if (mode === 'stocks') {
+    currentPair = 'AAPL';
+    fetchStockPrices();
+  } else {
+    currentPair = 'XBTAUD';
+  }
+  renderDashboard();
+}
+
+async function fetchStockPrices() {
+  if (!serverOnline || !cfg.botToken) return;
+  try {
+    const syms = STOCKS.slice(0, 6).join(',');
+    const r = await api(`/api/alpaca/quotes?symbols=${syms}`).catch(() => null);
+    if (r?.data) {
+      for (const [sym, data] of Object.entries(r.data)) {
+        stockPrices[sym] = { price: data.price, change24h: data.change24h || 0 };
+      }
+      if (currentTab === 'dashboard' && marketMode === 'stocks') renderDashboard();
+    }
+  } catch(e) {}
 }
 
 function selectPair(pair) {
