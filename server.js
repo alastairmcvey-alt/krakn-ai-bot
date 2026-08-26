@@ -446,6 +446,283 @@ async function scanOptionsOpportunities() {
   return results;
 }
 
+// ─── Alpaca Stock Trading System ──────────────────────────────
+// Runs parallel to crypto — same signal engine, same stop system,
+// same Telegram notifications, but using Alpaca paper account
+
+let alpacaPositions    = {}; // { AAPL: { qty, avgEntryPrice, entryTime } }
+let alpacaPeakPrices   = {}; // { AAPL: peakPrice } for trailing stop
+let alpacaBuyTimes     = {}; // { AAPL: timestamp }
+let alpacaBuyNotifyCache = {}; // cooldown per symbol
+
+// Fetch Alpaca account balance (buying power)
+async function getAlpacaBuyingPower() {
+  try {
+    const account = await alpacaRequest('/account');
+    return {
+      buyingPower: parseFloat(account.buying_power || 0),
+      portfolioValue: parseFloat(account.portfolio_value || 0),
+      cash: parseFloat(account.cash || 0),
+    };
+  } catch(e) { return { buyingPower: 0, portfolioValue: 0, cash: 0 }; }
+}
+
+// Fetch current Alpaca positions
+async function getAlpacaPositions() {
+  try {
+    const positions = await alpacaRequest('/positions');
+    return Array.isArray(positions) ? positions : [];
+  } catch(e) { return []; }
+}
+
+// Place Alpaca stock order
+async function placeAlpacaStockOrder(symbol, side, qty, orderType = 'market') {
+  const base = ALPACA_PAPER ? 'https://paper-api.alpaca.markets/v2' : ALPACA_BASE_URL;
+  const body = { symbol, qty: qty.toString(), side, type: orderType, time_in_force: 'day' };
+  const res  = await fetch(`${base}/orders`, {
+    method: 'POST',
+    headers: { 'APCA-API-KEY-ID': ALPACA_KEY, 'APCA-API-SECRET-KEY': ALPACA_SECRET, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { const e = await res.text(); throw new Error(e); }
+  return res.json();
+}
+
+// Check if US market is currently open
+function isMarketOpen() {
+  const now     = new Date();
+  const sydney  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day     = sydney.getDay();
+  const hours   = sydney.getHours();
+  const minutes = sydney.getMinutes();
+  const time    = hours * 60 + minutes;
+  // Mon-Fri, 9:30am-4:00pm ET
+  return day >= 1 && day <= 5 && time >= 570 && time < 960;
+}
+
+// Fast stock signal scan — RSI + MACD using Alpaca daily bars
+async function computeStockSignal(symbol) {
+  try {
+    const bars = await fetchStockBars(symbol, 1440, 30); // daily bars
+    if (!bars || bars.length < 14) return { action:'HOLD', confidence:50, rsi:50, symbol };
+
+    const closes  = bars.map(c => parseFloat(c[4]));
+    const rsi     = calcRSI(closes);
+    const macd    = calcMACD(closes);
+    const bb      = calcBollingerBands(closes);
+
+    // 20-day MA trend filter
+    const ma20    = closes.slice(-20).reduce((s,v) => s+v, 0) / Math.min(20, closes.length);
+    const lastClose = closes[closes.length - 1];
+    const aboveMa20 = lastClose > ma20;
+
+    let score = 0;
+    if (rsi < 35)       score += 3;
+    else if (rsi < 45)  score += 1;
+    else if (rsi > 65)  score -= 1;
+    else if (rsi > 75)  score -= 3;
+    if (macd.trend === 'BULLISH')    score += 2;
+    else if (macd.trend === 'BEARISH') score -= 2;
+    if (bb.position === 'OVERSOLD')  score += 2;
+    if (bb.position === 'OVERBOUGHT') score -= 2;
+    if (!aboveMa20 && score > 0)     score -= 2; // below MA = trend penalty
+
+    let action = 'HOLD', confidence = 50;
+    if (score >= 5)       { action='BUY';  confidence=Math.min(90, 60+(score/15)*35); }
+    else if (score <= -5) { action='SELL'; confidence=Math.min(90, 60+(Math.abs(score)/15)*35); }
+    else if (score >= 3)  { action='BUY';  confidence=Math.min(72, 50+(score/15)*30); }
+    else if (score <= -3) { action='SELL'; confidence=Math.min(72, 50+(Math.abs(score)/15)*30); }
+
+    // RSI boost
+    if (rsi < 28) confidence = Math.min(95, confidence + 8);
+    else if (rsi < 33) confidence = Math.min(95, confidence + 4);
+
+    return { action, confidence: Math.round(confidence), rsi: Math.round(rsi), score, symbol, aboveMa20, macd: macd.trend };
+  } catch(e) {
+    console.warn(`[STOCK SIGNAL] ${symbol}:`, e.message);
+    return { action:'HOLD', confidence:50, rsi:50, symbol };
+  }
+}
+
+// Scheduled stock buy check — runs same time as crypto check
+async function checkStockOpportunities() {
+  if (!ALPACA_KEY || !isMarketOpen()) {
+    if (!isMarketOpen()) console.log('[STOCK CHECK] Market closed — skipping');
+    return;
+  }
+  try {
+    console.log('[STOCK CHECK] Scanning US stocks...');
+    const acct       = await getAlpacaBuyingPower();
+    const buyingPower = acct.buyingPower;
+    if (buyingPower < 100) { console.log(`[STOCK CHECK] Insufficient buying power: $${buyingPower}`); return; }
+
+    const watchlist  = ['AAPL','NVDA','MSFT','TSLA','GOOGL','AMZN','META','SPY','QQQ'];
+    let bestStock    = null;
+    let bestScore    = 0;
+
+    for (const sym of watchlist) {
+      try {
+        const signal = await computeStockSignal(sym);
+        const threshold = botConfig.confidenceMin || 65;
+        console.log(`[STOCK CHECK] ${sym}: ${signal.action} ${signal.confidence}% RSI:${signal.rsi} — ${signal.action==='BUY'&&signal.confidence>=threshold?'✅':'skip'}`);
+        if (signal.action === 'BUY' && signal.confidence >= threshold) {
+          if (!bestStock || signal.confidence > bestScore) {
+            bestStock = signal;
+            bestScore = signal.confidence;
+          }
+        }
+      } catch(e) {}
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    if (!bestStock) { console.log('[STOCK CHECK] No qualifying stocks this run'); return; }
+
+    // Cooldown check
+    const lastNotify = alpacaBuyNotifyCache[bestStock.symbol] || 0;
+    if (Date.now() - lastNotify < 4 * 60 * 60 * 1000) {
+      console.log(`[STOCK CHECK] ${bestStock.symbol} in cooldown`); return;
+    }
+
+    // Get current price
+    const ticker   = await fetchStockTicker(bestStock.symbol);
+    if (!ticker) return;
+
+    // Position sizing — 10% of buying power per trade, scaled by confidence
+    const sizeMultiplier = bestStock.confidence >= 85 ? 1.3 : bestStock.confidence >= 75 ? 1.0 : 0.7;
+    const tradeValue     = Math.min(buyingPower * 0.10 * sizeMultiplier, buyingPower * 0.20);
+    const qty            = Math.floor(tradeValue / ticker.price);
+    if (qty < 1) { console.log(`[STOCK CHECK] ${bestStock.symbol} qty < 1 — price too high for position size`); return; }
+
+    alpacaBuyNotifyCache[bestStock.symbol] = Date.now();
+
+    // Auto-buy or manual prompt
+    if (botConfig.autoBuy && bestStock.confidence >= botConfig.autoBuyMinConfidence) {
+      try {
+        const order = await placeAlpacaStockOrder(bestStock.symbol, 'buy', qty);
+        alpacaBuyTimes[bestStock.symbol] = Date.now();
+        await sendTelegram(
+          `🤖 <b>ALPACA AUTO-BUY EXECUTED!</b>\n\n` +
+          `<b>${bestStock.symbol}</b> (Paper Trading)\n` +
+          `Bought: ${qty} shares @ US$${ticker.price.toFixed(2)}\n` +
+          `Total: ≈ US$${(qty * ticker.price).toFixed(2)}\n` +
+          `Order ID: ${order.id}\n\n` +
+          `Signal: RSI ${bestStock.rsi} | Confidence: ${bestStock.confidence}%\n` +
+          `4H Stop Protection:\n` +
+          `🔴 Stop loss: -${botConfig.stopLossPct}%\n` +
+          `🟡 Break-even at: +${botConfig.breakEvenTriggerPct}%\n` +
+          `🟢 Trailing stop at: +${botConfig.trailingTriggerPct}%`
+        );
+        console.log(`[STOCK AUTO-BUY] ${bestStock.symbol} × ${qty} @ $${ticker.price}`);
+      } catch(e) {
+        await sendTelegram(`❌ Alpaca auto-buy failed for ${bestStock.symbol}: ${e.message}`);
+      }
+    } else {
+      // Manual YES/NO prompt — same as crypto
+      await sendTelegram(
+        `🟢 <b>STOCK BUY OPPORTUNITY!</b>\n\n` +
+        `<b>${bestStock.symbol}</b> (Alpaca Paper Trading)\n` +
+        `Price: US$${ticker.price.toFixed(2)}\n` +
+        `RSI: ${bestStock.rsi} | Confidence: ${bestStock.confidence}%\n` +
+        `24h Change: ${ticker.change24h >= 0 ? '+' : ''}${ticker.change24h}%\n\n` +
+        `💰 Suggested: <b>${qty} shares ≈ US$${(qty*ticker.price).toFixed(0)}</b>\n` +
+        `Buying power: US$${Math.round(buyingPower).toLocaleString()}\n\n` +
+        `Reply <b>BUY ${bestStock.symbol}</b> to execute or <b>NO</b> to skip.\n` +
+        `⏰ Expires in 10 minutes`
+      );
+    }
+  } catch(e) { console.error('[STOCK CHECK ERROR]', e.message); }
+}
+
+// Stock position monitor — runs with auto-sell bot, same 3-stage stop system
+async function checkStockPositions() {
+  if (!ALPACA_KEY) return;
+  try {
+    const positions = await getAlpacaPositions();
+    if (!positions.length) return;
+
+    for (const pos of positions) {
+      if (pos.asset_class !== 'us_equity') continue;
+      const sym        = pos.symbol;
+      const qty        = parseFloat(pos.qty);
+      const entryPrice = parseFloat(pos.avg_entry_price);
+      const currPrice  = parseFloat(pos.current_price);
+      const gainPct    = ((currPrice - entryPrice) / entryPrice) * 100;
+      const dp         = `${sym} (Stock)`;
+
+      // Track peak for trailing stop
+      if (!alpacaPeakPrices[sym] || currPrice > alpacaPeakPrices[sym]) {
+        alpacaPeakPrices[sym] = currPrice;
+      }
+      const peakPrice  = alpacaPeakPrices[sym];
+      const dropFromPeak = ((currPrice - peakPrice) / peakPrice) * 100;
+      const stopPct    = botConfig.stopLossPct || 3;
+      const breakEven  = botConfig.breakEvenTriggerPct || 2;
+      const trailTrig  = botConfig.trailingTriggerPct || 4;
+
+      console.log(`[STOCK POS] ${dp} entry:$${entryPrice} curr:$${currPrice} gain:${gainPct.toFixed(1)}% peak:$${peakPrice}`);
+
+      let exitReason = null;
+
+      // Stage 3 — trailing stop (profit zone)
+      if (gainPct >= trailTrig && dropFromPeak <= -stopPct) {
+        exitReason = `trailing-stop (+${gainPct.toFixed(1)}% peak, -${Math.abs(dropFromPeak).toFixed(1)}% drop)`;
+      }
+      // Stage 2 — break-even stop
+      else if (gainPct >= breakEven && currPrice <= entryPrice * 0.997) {
+        exitReason = `break-even (was +${gainPct.toFixed(1)}%, returned to entry)`;
+      }
+      // Stage 1 — hard stop loss
+      else if (gainPct <= -stopPct) {
+        exitReason = `stop-loss (${gainPct.toFixed(1)}% below entry)`;
+      }
+
+      if (exitReason) {
+        try {
+          if (!isMarketOpen()) {
+            console.log(`[STOCK POS] ${sym} would exit (${exitReason}) but market closed`);
+            continue;
+          }
+          const order = await placeAlpacaStockOrder(sym, 'sell', qty);
+          delete alpacaPeakPrices[sym];
+          delete alpacaBuyTimes[sym];
+          const pnl = (currPrice - entryPrice) * qty;
+          await sendTelegram(
+            `${gainPct >= 0 ? '🟢' : '🔴'} <b>ALPACA SELL COMPLETED!</b>\n\n` +
+            `<b>${sym}</b> (Paper Trading)\n` +
+            `Sold: ${qty} shares @ US$${currPrice.toFixed(2)}\n` +
+            `Entry: US$${entryPrice.toFixed(2)} → Exit: US$${currPrice.toFixed(2)}\n` +
+            `P&L: ${pnl >= 0 ? '🟢 +' : '🔴 '}US$${Math.abs(pnl).toFixed(2)} (${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(2)}%)\n` +
+            `Reason: ${exitReason}\n` +
+            `Order: ${order.id}`
+          );
+          console.log(`[STOCK SELL] ${sym} × ${qty} — ${exitReason}`);
+        } catch(e) {
+          console.error(`[STOCK SELL ERROR] ${sym}:`, e.message);
+          await sendTelegram(`❌ Alpaca sell failed for ${sym}: ${e.message}`);
+        }
+      }
+    }
+  } catch(e) { console.error('[STOCK POSITIONS ERROR]', e.message); }
+}
+
+// Handle "BUY SYMBOL" Telegram commands for stocks
+async function handleStockBuyCommand(sym, chatId) {
+  if (!ALPACA_KEY) { await sendTelegramTo(chatId, '❌ Alpaca not configured'); return; }
+  if (!isMarketOpen()) { await sendTelegramTo(chatId, `⏰ Market closed right now. ${sym} order will execute at next market open.`); return; }
+  try {
+    const ticker  = await fetchStockTicker(sym);
+    const acct    = await getAlpacaBuyingPower();
+    const qty     = Math.floor((acct.buyingPower * 0.10) / ticker.price);
+    if (qty < 1) { await sendTelegramTo(chatId, `❌ Insufficient buying power for ${sym}`); return; }
+    await sendTelegramTo(chatId, `⏳ Placing order for ${qty} × ${sym}...`);
+    const order = await placeAlpacaStockOrder(sym, 'buy', qty);
+    alpacaBuyTimes[sym] = Date.now();
+    await sendTelegramTo(chatId,
+      `✅ <b>Order placed!</b>\n${qty} × ${sym} @ US$${ticker.price.toFixed(2)}\nOrder: ${order.id}`
+    );
+  } catch(e) { await sendTelegramTo(chatId, `❌ Error: ${e.message}`); }
+}
+
 // ─── Universal ticker — routes to Kraken or Alpaca ────────────
 async function fetchTickerUniversal(symbol) {
   if (isStockSymbol(symbol)) return fetchStockTicker(symbol);
@@ -851,11 +1128,28 @@ async function sendDailyPortfolioDigest() {
       ? Math.round(tradeOutcomes.filter(t=>t.won).length / tradesCount * 100)
       : 0;
 
+    // 7. Alpaca paper trading summary
+    let alpacaSection = '';
+    if (ALPACA_KEY) {
+      try {
+        const acct       = await getAlpacaBuyingPower();
+        const alpacaPos  = await getAlpacaPositions();
+        const stockLines = alpacaPos.filter(p=>p.asset_class==='us_equity').map(p => {
+          const gain = ((parseFloat(p.current_price)-parseFloat(p.avg_entry_price))/parseFloat(p.avg_entry_price)*100);
+          return `• ${p.symbol}: ${p.qty}sh ${gain>=0?'🟢 +':'🔴 '}${gain.toFixed(1)}%`;
+        }).join('\n') || '• No open positions';
+        alpacaSection =
+          `📈 <b>Alpaca Paper Trading</b>\n` +
+          `Portfolio: US$${Math.round(acct.portfolioValue).toLocaleString()} | Cash: US$${Math.round(acct.cash).toLocaleString()}\n` +
+          `${stockLines}\n\n`;
+      } catch(e) {}
+    }
+
     await sendTelegram(
       `📊 <b>KRAKN·AI Daily Portfolio Summary</b>\n` +
       `${sydneyTime}\n\n` +
 
-      `💼 <b>Portfolio</b>\n` +
+      `💼 <b>Kraken Portfolio</b>\n` +
       `Total value: <b>A$${Math.round(totalValue).toLocaleString()}</b>\n` +
       `Cash available: A$${audCash.toFixed(2)}\n` +
       `All-time realised P&L: ${allRealised >= 0 ? '🟢 +' : '🔴 '}A$${Math.abs(allRealised).toFixed(2)}\n\n` +
@@ -867,6 +1161,8 @@ async function sendDailyPortfolioDigest() {
       `⚡ <b>Last 7 Days</b>\n` +
       `${weekTrades.length} trades · ${weekWins} wins · ${weekPnl >= 0 ? '+' : ''}A$${weekPnl.toFixed(2)} P&L\n\n` : '') +
 
+      alpacaSection +
+
       `🌐 <b>Market Prices</b>\n` +
       `${watchSignals.join('\n')}\n\n` +
 
@@ -874,7 +1170,7 @@ async function sendDailyPortfolioDigest() {
       `${botRunning ? '🟢 Running' : '⏸ Paused'} · ${botConfig.confidenceMin}% threshold · ${botConfig.stopLossPct}% stop\n` +
       `${tradesCount} total trades · ${winRate}% win rate\n\n` +
 
-      `💡 Reply <b>Any signals?</b> for a live scan`
+      `💡 Reply <b>Any signals?</b> for crypto · <b>stocks</b> for Alpaca status`
     );
 
     console.log('[DAILY DIGEST] Portfolio digest sent');
@@ -2841,6 +3137,39 @@ async function handleTelegramMessage(chatId, userMessage, username) {
   if (msg === 'run analysis' || msg === '/analysis' || msg === 'analyse' || msg === 'analyze') {
     await sendTelegramTo(chatId, '⏳ Running full market analysis... give me 30 seconds!');
     await runAdvisor();
+    return;
+  }
+
+  // ── Stock buy commands — "BUY AAPL", "BUY NVDA" etc ─────────
+  const stockBuyMatch = msg.match(/^buy\s+([A-Z]{1,5})$/i);
+  if (stockBuyMatch) {
+    const sym = stockBuyMatch[1].toUpperCase();
+    if (US_STOCKS.includes(sym)) {
+      await handleStockBuyCommand(sym, chatId);
+      return;
+    }
+  }
+
+  // ── Alpaca status command ────────────────────────────────────
+  if (msg.includes('alpaca') || msg.includes('stocks') || msg.includes('alpaca status')) {
+    try {
+      const acct = await getAlpacaBuyingPower();
+      const pos  = await getAlpacaPositions();
+      const open = isMarketOpen();
+      await sendTelegramTo(chatId,
+        `📈 <b>Alpaca Paper Trading Status</b>\n\n` +
+        `Market: ${open ? '🟢 OPEN' : '🔴 CLOSED'}\n` +
+        `Portfolio Value: US$${Math.round(acct.portfolioValue).toLocaleString()}\n` +
+        `Buying Power: US$${Math.round(acct.buyingPower).toLocaleString()}\n` +
+        `Cash: US$${Math.round(acct.cash).toLocaleString()}\n\n` +
+        `Open Positions: ${pos.length}\n` +
+        (pos.length > 0 ? pos.map(p => {
+          const gain = ((parseFloat(p.current_price)-parseFloat(p.avg_entry_price))/parseFloat(p.avg_entry_price)*100);
+          return `• ${p.symbol}: ${p.qty} shares ${gain>=0?'🟢 +':'🔴 '}${gain.toFixed(1)}%`;
+        }).join('\n') : 'No open positions') +
+        `\n\n💡 Reply <b>BUY AAPL</b> (or any stock) to place an order`
+      );
+    } catch(e) { await sendTelegramTo(chatId, '❌ Could not fetch Alpaca status: ' + e.message); }
     return;
   }
 
@@ -6497,7 +6826,11 @@ app.listen(PORT, async () => {
   scheduleAdvisor();
   scheduleBuyCheck();
   scheduleDCA();
-  scheduleDailyDigest(); // 8am Sydney daily portfolio summary
+  scheduleDailyDigest();
+
+  // Stock checks — run every 30min alongside crypto (market hours only)
+  setInterval(async () => { try { await checkStockOpportunities(); } catch(e){} }, 30 * 60 * 1000);
+  setInterval(async () => { try { await checkStockPositions();     } catch(e){} }, 5  * 60 * 1000); // 8am Sydney daily portfolio summary
 
   setInterval(async () => { try { await checkVolumeAnomalies();   } catch(e) { console.error('[VOLUME]', e.message); } }, 15 * 60 * 1000);
   setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART]', e.message);  } }, 6 * 60 * 60 * 1000); // 6h (was 15min — huge cost saving)
