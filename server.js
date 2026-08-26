@@ -260,6 +260,192 @@ async function placeStockOrder(symbol, side, qty, orderType = 'market', limitPri
   return res.json();
 }
 
+// ─── Options Trading Engine ────────────────────────────────────
+// Alpaca options use same order endpoint with contract symbol
+// Contract symbol format: AAPL250117C00150000
+// = AAPL + expiry (YYMMDD) + C/P + strike * 1000 (8 digits)
+
+// Fetch options chain for a stock
+async function fetchOptionsChain(symbol, expirationDate = null) {
+  try {
+    let url = `/options/contracts?underlying_symbols=${symbol}&limit=100`;
+    if (expirationDate) url += `&expiration_date=${expirationDate}`;
+    const data = await alpacaRequest(url);
+    return data.option_contracts || [];
+  } catch(e) {
+    console.warn(`[OPTIONS CHAIN] ${symbol}:`, e.message);
+    return [];
+  }
+}
+
+// Get the best options contract for a signal
+// Strategy: buy ATM call on BUY signal, buy ATM put on SELL signal
+// Selects contract closest to current price, ~30 days to expiry
+async function selectOptionsContract(symbol, side, stockPrice) {
+  try {
+    // Target expiry: ~30 days out
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() + 30);
+    const expiryStr  = targetDate.toISOString().split('T')[0];
+
+    // Fetch chain
+    const contracts = await fetchOptionsChain(symbol);
+    if (!contracts.length) return null;
+
+    const type = side === 'buy' ? 'call' : 'put';
+
+    // Filter by type and find ATM (closest strike to current price)
+    const filtered = contracts
+      .filter(c => c.type === type && c.status === 'active')
+      .map(c => ({
+        ...c,
+        strikeDiff: Math.abs(parseFloat(c.strike_price) - stockPrice),
+        daysToExpiry: Math.ceil((new Date(c.expiration_date) - new Date()) / 86400000),
+      }))
+      .filter(c => c.daysToExpiry > 7 && c.daysToExpiry < 60)
+      .sort((a,b) => a.strikeDiff - b.strikeDiff);
+
+    return filtered[0] || null;
+  } catch(e) {
+    console.warn(`[OPTIONS SELECT] ${symbol}:`, e.message);
+    return null;
+  }
+}
+
+// Place an options order
+async function placeOptionsOrder(contractSymbol, side, qty = 1) {
+  const body = {
+    symbol:        contractSymbol,
+    qty:           qty.toString(),
+    side,          // 'buy' or 'sell'
+    type:          'market',
+    time_in_force: 'day',
+    order_class:   'simple',
+  };
+  const base = ALPACA_PAPER ? 'https://paper-api.alpaca.markets/v2' : ALPACA_BASE_URL;
+  const res  = await fetch(`${base}/orders`, {
+    method:  'POST',
+    headers: {
+      'APCA-API-KEY-ID':     ALPACA_KEY,
+      'APCA-API-SECRET-KEY': ALPACA_SECRET,
+      'Content-Type':        'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { const err = await res.text(); throw new Error(`Options order failed: ${err}`); }
+  return res.json();
+}
+
+// Smart options strategy — called when stock signal qualifies
+// BUY signal → buy call option (profit if stock rises)
+// SELL signal → buy put option (profit if stock falls)
+// This is the hackathon-required options integration
+async function executeOptionsStrategy(symbol, signal, stockPrice) {
+  try {
+    if (!ALPACA_KEY || !ALPACA_SECRET) return null;
+
+    const side     = signal.action === 'BUY' ? 'buy' : 'sell';
+    const optSide  = 'buy'; // always buying options (limited risk)
+    const contract = await selectOptionsContract(symbol, side, stockPrice);
+
+    if (!contract) {
+      console.log(`[OPTIONS] No suitable contract found for ${symbol}`);
+      return null;
+    }
+
+    console.log(`[OPTIONS] ${symbol} ${signal.action} → buying ${contract.type} ${contract.symbol} strike $${contract.strike_price} exp ${contract.expiration_date}`);
+
+    const order = await placeOptionsOrder(contract.symbol, optSide, 1);
+
+    // Notify via Telegram
+    await sendTelegram(
+      `⚙️ <b>OPTIONS ORDER PLACED</b>\n\n` +
+      `<b>${symbol}</b> — ${signal.action} signal ${signal.confidence}%\n` +
+      `Strategy: Buy ${contract.type.toUpperCase()}\n` +
+      `Contract: ${contract.symbol}\n` +
+      `Strike: $${contract.strike_price} | Expiry: ${contract.expiration_date}\n` +
+      `Days to expiry: ${Math.ceil((new Date(contract.expiration_date) - new Date()) / 86400000)}\n\n` +
+      `📊 RSI: ${signal.rsi} | Regime: ${signal.regime || 'N/A'}\n` +
+      `Order ID: ${order.id}`
+    );
+
+    return order;
+  } catch(e) {
+    console.error('[OPTIONS] Strategy failed:', e.message);
+    return null;
+  }
+}
+
+// Covered call strategy — generate income on existing stock positions
+// Sell call above current price on stocks held with neutral/weak signal
+async function executeCoveredCall(symbol, stockPrice, signal) {
+  try {
+    // Only run if we hold the stock and signal is HOLD/weak
+    if (signal.action === 'BUY' || signal.confidence > 75) return null;
+
+    const positions = await getAlpacaPositions();
+    const held = positions.find(p => p.symbol === symbol && parseFloat(p.qty) >= 100);
+    if (!held) return null; // need 100 shares for covered call
+
+    // Sell call ~5% above current price, 30 days out
+    const strikeTarget = stockPrice * 1.05;
+    const contracts    = await fetchOptionsChain(symbol);
+    const callAbove    = contracts
+      .filter(c => c.type === 'call' && parseFloat(c.strike_price) >= strikeTarget)
+      .map(c => ({ ...c, daysToExpiry: Math.ceil((new Date(c.expiration_date) - new Date()) / 86400000) }))
+      .filter(c => c.daysToExpiry > 14 && c.daysToExpiry < 45)
+      .sort((a,b) => parseFloat(a.strike_price) - parseFloat(b.strike_price))[0];
+
+    if (!callAbove) return null;
+
+    const order = await placeOptionsOrder(callAbove.symbol, 'sell', 1);
+    console.log(`[COVERED CALL] ${symbol} sold call ${callAbove.symbol} at strike $${callAbove.strike_price}`);
+    return order;
+  } catch(e) {
+    console.warn('[COVERED CALL]', e.message);
+    return null;
+  }
+}
+
+// Options signal scanner — checks US stocks for options opportunities
+async function scanOptionsOpportunities() {
+  if (!ALPACA_KEY) return;
+  const watchlist = ['AAPL','NVDA','MSFT','TSLA','SPY','QQQ'];
+  const results   = [];
+
+  for (const sym of watchlist) {
+    try {
+      const ticker = await fetchStockTicker(sym);
+      if (!ticker) continue;
+
+      // Quick RSI check using daily bars
+      const bars   = await fetchStockBars(sym, 1440, 20);
+      if (bars.length < 14) continue;
+      const closes = bars.map(b => parseFloat(b[4]));
+      const rsi    = calcRSI(closes);
+
+      let signal = 'HOLD', confidence = 50;
+      if (rsi < 30)       { signal = 'BUY';  confidence = 72; }
+      else if (rsi < 35)  { signal = 'BUY';  confidence = 65; }
+      else if (rsi > 70)  { signal = 'SELL'; confidence = 72; }
+      else if (rsi > 65)  { signal = 'SELL'; confidence = 65; }
+
+      if (signal !== 'HOLD') {
+        results.push({
+          symbol:     sym,
+          price:      ticker.price,
+          rsi:        Math.round(rsi),
+          signal,
+          confidence,
+          change24h:  ticker.change24h,
+        });
+      }
+    } catch(e) {}
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return results;
+}
+
 // ─── Universal ticker — routes to Kraken or Alpaca ────────────
 async function fetchTickerUniversal(symbol) {
   if (isStockSymbol(symbol)) return fetchStockTicker(symbol);
@@ -4906,6 +5092,74 @@ app.get('/api/alpaca/signals', requireAuth, async (req, res) => {
       } catch(e) { console.warn(`[STOCK SIGNAL] ${sym}:`, e.message); }
     }
     res.json({ success:true, data: results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stock quotes for app dashboard — returns price + 24h change for multiple symbols
+app.get('/api/alpaca/quotes', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error:'Alpaca not configured' });
+    const symbols = (req.query.symbols || 'AAPL,NVDA,MSFT,TSLA,SPY').split(',');
+    const result  = {};
+    for (const sym of symbols.slice(0, 9)) {
+      try {
+        const ticker = await fetchStockTicker(sym);
+        if (ticker) result[sym] = { price: ticker.price, change24h: ticker.change24h || 0 };
+      } catch(e) {}
+      await new Promise(r => setTimeout(r, 100));
+    }
+    res.json({ success:true, data: result });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stock bars for chart
+app.get('/api/alpaca/bars/:symbol', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error:'Alpaca not configured' });
+    const { symbol } = req.params;
+    const interval   = parseInt(req.query.interval) || 60;
+    const bars       = await fetchStockBars(symbol, interval, 80);
+    res.json({ success:true, data: bars });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+// Get options chain for a stock
+app.get('/api/alpaca/options/chain/:symbol', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error: 'Alpaca not configured' });
+    const contracts = await fetchOptionsChain(req.params.symbol);
+    res.json({ success:true, data: contracts, count: contracts.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Scan for options opportunities across watchlist
+app.get('/api/alpaca/options/scan', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error: 'Alpaca not configured' });
+    const results = await scanOptionsOpportunities();
+    res.json({ success:true, data: results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Execute options strategy for a stock
+app.post('/api/alpaca/options/trade', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error: 'Alpaca not configured' });
+    const { symbol, action, confidence, rsi, regime } = req.body;
+    const ticker  = await fetchStockTicker(symbol);
+    if (!ticker)  return res.status(404).json({ error: 'Could not fetch ticker' });
+    const signal  = { action, confidence, rsi, regime };
+    const order   = await executeOptionsStrategy(symbol, signal, ticker.price);
+    res.json({ success:!!order, data: order });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get all open options positions
+app.get('/api/alpaca/options/positions', requireAuth, async (req, res) => {
+  try {
+    if (!ALPACA_KEY) return res.status(503).json({ error: 'Alpaca not configured' });
+    const positions = await getAlpacaPositions();
+    const options   = positions.filter(p => p.asset_class === 'us_option');
+    res.json({ success:true, data: options });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
