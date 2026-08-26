@@ -982,13 +982,27 @@ function showToast(msg, dur=3000) {
 // Shows all coins' current signal at a glance — no AI calls, just the fast scan
 async function renderSignals() {
   const d = document.getElementById('content');
+  const isStocks = marketMode === 'stocks';
+  const activePairs = isStocks ? STOCKS : PAIRS;
+  const label = isStocks ? 'US Stocks — Alpaca Paper' : 'Crypto — Kraken Live';
+  const accentColor = isStocks ? 'rgba(118,185,0,0.1)' : 'rgba(0,200,255,0.1)';
+  const borderColor = isStocks ? 'rgba(118,185,0,0.25)' : 'rgba(0,200,255,0.25)';
+  const textColor   = isStocks ? '#76B900' : 'var(--cyan)';
+  const marketNote  = isStocks
+    ? 'US market hours: 11:30pm–6am AEST · Bot scans every 30min during open hours'
+    : 'Bot scans every 30min · Tap Markets for full AI chart analysis';
+
   d.innerHTML = `<div style="padding:16px 20px 90px" class="fade-in">
-    <div class="section-label">Live Signals — All Pairs</div>
+    <div class="market-toggle" style="margin-bottom:12px">
+      <div class="mkt-btn ${!isStocks?'active':''}" onclick="setMarketMode('crypto');renderSignals()">◈ CRYPTO</div>
+      <div class="mkt-btn stocks ${isStocks?'active stocks':''}" onclick="setMarketMode('stocks');renderSignals()">📈 US STOCKS</div>
+    </div>
+    <div class="section-label">${label}</div>
     <div id="signalsList">
-      ${PAIRS.map(p=>`<div class="signal-row-card" id="sigcard-${p}">
+      ${activePairs.map(p=>`<div class="signal-row-card" id="sigcard-${p}" onclick="selectPair('${p}');showTab('dashboard')">
         <div style="display:flex;align-items:center;justify-content:space-between">
           <div>
-            <div style="font-weight:600;font-size:14px">${DISP[p]||p}</div>
+            <div style="font-weight:600;font-size:14px">${isStocks ? p : (DISP[p]||p)}</div>
             <div style="font-family:var(--font-data);font-size:11px;color:var(--muted)" id="sigcard-price-${p}">Loading...</div>
           </div>
           <div style="text-align:right">
@@ -999,35 +1013,52 @@ async function renderSignals() {
         <div style="font-size:11px;color:var(--muted);margin-top:6px" id="sigcard-reason-${p}">Scanning...</div>
       </div>`).join('')}
     </div>
-    <button style="width:100%;margin-top:12px;padding:12px;background:rgba(0,200,255,0.1);border:1px solid rgba(0,200,255,0.25);border-radius:12px;color:var(--cyan);font-family:var(--font-data);font-size:12px;cursor:pointer;letter-spacing:0.06em" onclick="renderSignals()">↻ REFRESH ALL</button>
-    <div style="margin-top:10px;font-family:var(--font-data);font-size:10px;color:var(--muted);text-align:center">Fast scan — no vision. Tap Markets to get full AI analysis.</div>
+    <button style="width:100%;margin-top:12px;padding:12px;background:${accentColor};border:1px solid ${borderColor};border-radius:12px;color:${textColor};font-family:var(--font-data);font-size:12px;cursor:pointer;letter-spacing:0.06em" onclick="renderSignals()">↻ REFRESH ALL</button>
+    <div style="margin-top:10px;font-family:var(--font-data);font-size:10px;color:var(--muted);text-align:center">${marketNote}</div>
   </div>`;
 
-  // Load signals for each pair using price data + basic calc (no API cost)
-  for (const pair of PAIRS) {
+  // Load signals for each pair
+  for (const pair of activePairs) {
     try {
-      const p = getPair(pair);
       const priceEl  = document.getElementById(`sigcard-price-${pair}`);
       const actionEl = document.getElementById(`sigcard-action-${pair}`);
       const confEl   = document.getElementById(`sigcard-conf-${pair}`);
       const reasonEl = document.getElementById(`sigcard-reason-${pair}`);
-      if (priceEl && p) priceEl.textContent = fmtPrice(p.price, pair) + ' · ' + (p.change24h>=0?'+':'') + p.change24h + '%';
+
+      // Show price
+      if (isStocks) {
+        const sp = stockPrices[pair];
+        if (priceEl && sp) priceEl.textContent = `US$${sp.price?.toFixed(2)||'--'} · ${sp.change24h>=0?'+':''}${sp.change24h||0}%`;
+        else if (priceEl) priceEl.textContent = 'Tap refresh for price';
+      } else {
+        const p = getPair(pair);
+        if (priceEl && p) priceEl.textContent = fmtPrice(p.price, pair) + ' · ' + (p.change24h>=0?'+':'') + p.change24h + '%';
+      }
 
       if (serverOnline && cfg.botToken) {
-        const r = await api(`/api/signal/${pair}`).catch(()=>null);
-        if (r?.data) {
-          const s = r.data;
+        // Stocks use Alpaca signal endpoint, crypto uses Kraken signal endpoint
+        const endpoint = isStocks ? `/api/alpaca/signals?symbols=${pair}` : `/api/signal/${pair}`;
+        const r = await api(endpoint).catch(()=>null);
+        const s = isStocks ? r?.data?.[0] : r?.data;
+        if (s) {
           const col = s.action==='BUY'?'var(--green)':s.action==='SELL'?'var(--red)':'var(--amber)';
           if (actionEl) { actionEl.textContent=s.action; actionEl.style.background=col+'22'; actionEl.style.color=col; actionEl.style.borderColor=col+'44'; }
           if (confEl)   confEl.textContent = s.confidence+'%';
-          if (reasonEl) reasonEl.textContent = s.signals?.[0] || 'No dominant signal';
+          if (reasonEl) reasonEl.textContent = isStocks
+            ? `RSI: ${s.rsi||'--'} · ${s.macd||'--'} · ${s.aboveMa20?'Above':'Below'} 20MA`
+            : (s.signals?.[0] || 'No dominant signal');
+        } else {
+          if (actionEl) actionEl.textContent = '--';
+          if (reasonEl) reasonEl.textContent = isStocks && !serverOnline ? 'Connect server' : 'No signal data';
         }
       } else {
-        if (actionEl) { actionEl.textContent='--'; }
+        if (actionEl) actionEl.textContent = '--';
         if (reasonEl) reasonEl.textContent = 'Connect server for signals';
       }
     } catch {}
-    await new Promise(r=>setTimeout(r,200));
+    await new Promise(r=>setTimeout(r,300));
+  }
+}
   }
 }
 
