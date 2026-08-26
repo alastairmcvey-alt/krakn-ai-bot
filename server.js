@@ -6828,8 +6828,23 @@ app.listen(PORT, async () => {
   scheduleDCA();
   scheduleDailyDigest();
 
-  // Stock checks — run every 30min alongside crypto (market hours only)
-  setInterval(async () => { try { await checkStockOpportunities(); } catch(e){} }, 30 * 60 * 1000);
+  // Startup notification — confirms both markets active
+  setTimeout(async () => {
+    try {
+      const alpacaConnected = !!(ALPACA_KEY && ALPACA_SECRET);
+      await sendTelegram(
+        `🚀 <b>KRAKN·AI Started</b>\n\n` +
+        `🔑 Kraken: ✅ Live trading\n` +
+        `📈 Alpaca: ${alpacaConnected ? '✅ Paper trading ($100K)' : '❌ Not configured'}\n` +
+        `🤖 Risk: ${botConfig.riskLevel} | Confidence: ${botConfig.confidenceMin}% | Stop: ${botConfig.stopLossPct}%\n\n` +
+        `Scanning:\n` +
+        `• Crypto (Kraken): every 30min, 24/7\n` +
+        `${alpacaConnected ? '• US Stocks (Alpaca): every 30min, market hours\n' : ''}` +
+        `• Auto-sell bot: every 60 seconds\n\n` +
+        `💡 Commands: <b>Any signals?</b> · <b>portfolio</b> · <b>stocks</b> · <b>BUY AAPL</b>`
+      );
+    } catch(e) {}
+  }, 15 * 1000); // 15 seconds after startup
   setInterval(async () => { try { await checkStockPositions();     } catch(e){} }, 5  * 60 * 1000); // 8am Sydney daily portfolio summary
 
   setInterval(async () => { try { await checkVolumeAnomalies();   } catch(e) { console.error('[VOLUME]', e.message); } }, 15 * 60 * 1000);
