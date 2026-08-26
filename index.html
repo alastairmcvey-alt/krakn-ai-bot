@@ -64,7 +64,7 @@ html, body { height:100%; overflow:hidden; background:var(--void); color:var(--t
 .coin-chip .chg.down { color:var(--red); }
 
 /* ─── Market Mode Toggle ─── */
-.market-toggle { display:flex; gap:6px; padding:0 20px 0; margin-bottom:0; }
+.market-toggle { display:flex; gap:6px; padding:0 20px; margin-bottom:8px; }
 .mkt-btn { flex:1; padding:7px; text-align:center; background:var(--surface); border:1px solid var(--border);
   border-radius:10px; font-family:var(--font-data); font-size:10px; letter-spacing:0.08em;
   color:var(--muted); cursor:pointer; transition:all 0.2s; }
@@ -325,18 +325,24 @@ function showTab(tab) {
 function renderDashboard() {
   const d = document.getElementById('content');
   const p = getPair(currentPair);
-  const sym = SYMS[currentPair]||'BTC';
+  const activePairs = marketMode === 'stocks' ? STOCKS : PAIRS;
+  const sym = marketMode === 'stocks' ? currentPair : (SYMS[currentPair]||'BTC');
 
-  // Build coin chips
-  const chips = PAIRS.map(pair => {
-    const pd = getPair(pair);
+  // Build coin/stock chips
+  const chips = activePairs.map(pair => {
+    const pd = marketMode === 'stocks' ? stockPrices[pair] : getPair(pair);
     const up = (pd?.change24h||0) >= 0;
+    const label = marketMode === 'stocks' ? pair : (SYMS[pair]||pair);
     return `<div class="coin-chip ${pair===currentPair?'active':''}" onclick="selectPair('${pair}')">
-      ${SYMS[pair]||pair} <span class="chg ${up?'up':'down'}">${up?'+':''}${pd?.change24h||0}%</span>
+      ${label} <span class="chg ${up?'up':'down'}">${pd ? (up?'+':'')+pd.change24h+'%' : '--'}</span>
     </div>`;
   }).join('');
 
   d.innerHTML = `<div class="fade-in">
+    <div class="market-toggle">
+      <div class="mkt-btn ${marketMode==='crypto'?'active':''}" onclick="setMarketMode('crypto')">◈ CRYPTO</div>
+      <div class="mkt-btn stocks ${marketMode==='stocks'?'active stocks':''}" onclick="setMarketMode('stocks')">📈 US STOCKS</div>
+    </div>
     <div class="coin-rail">${chips}</div>
 
     <div class="price-block">
