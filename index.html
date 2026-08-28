@@ -516,12 +516,20 @@ async function drawChart(id, pair, interval=60) {
   if (!canvas) return;
   let candles = [];
   try {
-    const map = { 1:1,5:5,15:15,60:60,240:240,1440:1440 };
-    const r = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${interval}`);
-    const j = await r.json();
-    const key = Object.keys(j.result||{}).find(k=>k!=='last');
-    candles = j.result?.[key]?.slice(-80) || [];
-  } catch {}
+    if (marketMode === 'stocks') {
+      // Alpaca stock bars via server
+      if (serverOnline && cfg.botToken) {
+        const r = await api(`/api/alpaca/bars/${pair}?interval=${interval}`);
+        candles = r?.data || [];
+      }
+    } else {
+      // Kraken crypto candles — direct public API
+      const r = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${interval}`);
+      const j = await r.json();
+      const key = Object.keys(j.result||{}).find(k=>k!=='last');
+      candles = j.result?.[key]?.slice(-80) || [];
+    }
+  } catch(e) { console.warn('Chart fetch failed:', e.message); }
 
   const dpr = window.devicePixelRatio||1;
   const W   = canvas.parentElement.offsetWidth;
