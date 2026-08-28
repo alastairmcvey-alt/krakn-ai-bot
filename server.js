@@ -5363,10 +5363,13 @@ app.get('/api/alpaca/quote/:symbol', requireAuth, async (req, res) => {
 // Stock bars (OHLC)
 app.get('/api/alpaca/bars/:symbol', requireAuth, async (req, res) => {
   try {
-    const symbol = req.params.symbol.toUpperCase();
-    const tf     = req.query.timeframe || '1Hour';
-    const limit  = parseInt(req.query.limit) || 60;
-    const bars   = await fetchStockBars(symbol, tf, limit);
+    if (!ALPACA_KEY) return res.status(503).json({ error:'Alpaca not configured' });
+    const symbol   = req.params.symbol.toUpperCase();
+    // Accept either ?interval=60 (minutes, from app chart) or ?timeframe=1Hour (named)
+    const interval = parseInt(req.query.interval) || null;
+    const tf       = interval || req.query.timeframe || '1Hour';
+    const limit    = parseInt(req.query.limit) || 80;
+    const bars     = await fetchStockBars(symbol, tf, limit);
     res.json({ success:true, data: bars, symbol });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -5442,15 +5445,6 @@ app.get('/api/alpaca/quotes', requireAuth, async (req, res) => {
 });
 
 // Stock bars for chart
-app.get('/api/alpaca/bars/:symbol', requireAuth, async (req, res) => {
-  try {
-    if (!ALPACA_KEY) return res.status(503).json({ error:'Alpaca not configured' });
-    const { symbol } = req.params;
-    const interval   = parseInt(req.query.interval) || 60;
-    const bars       = await fetchStockBars(symbol, interval, 80);
-    res.json({ success:true, data: bars });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
 // Get options chain for a stock
 app.get('/api/alpaca/options/chain/:symbol', requireAuth, async (req, res) => {
   try {
