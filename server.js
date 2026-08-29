@@ -956,7 +956,7 @@ let botConfig = {
   trailingTriggerPct:   4.0,
   minHoldMinutes:       120,  // 2 hours minimum — was 60
   maxHoldHours:         120,  // 5 days max — exit even if no signal to free capital
-  currencyMode:         'AUD',
+  currencyMode:         'ALL', // crypto + US stocks — bot trades both markets autonomously
   autoBuy:              false,
   autoBuyMaxAUD:        200,
   autoBuyMinConfidence: 82,
@@ -1057,6 +1057,59 @@ setInterval(flushDigestQueues, 30 * 60 * 1000); // check every 30 mins
 // ─── Daily Portfolio Digest ────────────────────────────────────
 // Fires once per day at 8am Sydney time
 // Personal summary of YOUR portfolio — not generic market noise
+// ─── Portfolio Concentration Risk ──────────────────────────────
+// Groups crypto + Alpaca stock holdings into correlated risk buckets
+// so the daily digest can flag over-concentration in assets that
+// tend to move together (e.g. crypto + high-beta growth tech).
+const ASSET_CATEGORIES = {
+  // Crypto — all treated as one correlated risk-on bucket
+  'BTC':'Risk-On/High-Beta','ETH':'Risk-On/High-Beta','SOL':'Risk-On/High-Beta',
+  'XRP':'Risk-On/High-Beta','ADA':'Risk-On/High-Beta','LTC':'Risk-On/High-Beta',
+  'DOT':'Risk-On/High-Beta','LINK':'Risk-On/High-Beta','MATIC':'Risk-On/High-Beta',
+  // High-beta growth stocks
+  'NVDA':'Risk-On/High-Beta','TSLA':'Risk-On/High-Beta','AMZN':'Risk-On/High-Beta',
+  'META':'Risk-On/High-Beta','GOOGL':'Risk-On/High-Beta',
+  // Steadier mega-caps
+  'AAPL':'Mega-cap Stable','MSFT':'Mega-cap Stable',
+  // Diversified ETFs
+  'SPY':'Broad Market','QQQ':'Broad Market',
+};
+
+function computeConcentrationRisk(cryptoHoldings, stockPositions) {
+  try {
+    const buckets = {};
+    let totalAUD = 0;
+
+    for (const h of (cryptoHoldings || [])) {
+      const cat = ASSET_CATEGORIES[h.sym] || 'Other';
+      buckets[cat] = (buckets[cat] || 0) + (h.valueAUD || 0);
+      totalAUD += (h.valueAUD || 0);
+    }
+    for (const p of (stockPositions || [])) {
+      const valueAUD = parseFloat(p.market_value || 0) * 1.55; // rough USD→AUD
+      const cat = ASSET_CATEGORIES[p.symbol] || 'Other';
+      buckets[cat] = (buckets[cat] || 0) + valueAUD;
+      totalAUD += valueAUD;
+    }
+
+    if (totalAUD < 1) return null;
+
+    const breakdown = Object.entries(buckets)
+      .map(([name, valueAUD]) => ({ name, valueAUD, pct: (valueAUD / totalAUD) * 100 }))
+      .sort((a, b) => b.pct - a.pct);
+
+    const riskOnPct = breakdown.find(b => b.name === 'Risk-On/High-Beta')?.pct || 0;
+    const warning = riskOnPct >= 65
+      ? `⚠️ ${riskOnPct.toFixed(0)}% of your combined portfolio is in correlated risk-on assets (crypto + growth tech) — these tend to drop together in risk-off conditions.`
+      : null;
+
+    return { totalAUD, breakdown, warning };
+  } catch (e) {
+    console.warn('[CONCENTRATION] Calc failed:', e.message);
+    return null;
+  }
+}
+
 async function sendDailyPortfolioDigest() {
   try {
     const sydneyTime = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'full', timeStyle:'short' });
@@ -1130,11 +1183,13 @@ async function sendDailyPortfolioDigest() {
 
     // 7. Alpaca paper trading summary
     let alpacaSection = '';
+    let alpacaPositionsForRisk = [];
     if (ALPACA_KEY) {
       try {
         const acct       = await getAlpacaBuyingPower();
         const alpacaPos  = await getAlpacaPositions();
-        const stockLines = alpacaPos.filter(p=>p.asset_class==='us_equity').map(p => {
+        alpacaPositionsForRisk = alpacaPos.filter(p=>p.asset_class==='us_equity');
+        const stockLines = alpacaPositionsForRisk.map(p => {
           const gain = ((parseFloat(p.current_price)-parseFloat(p.avg_entry_price))/parseFloat(p.avg_entry_price)*100);
           return `• ${p.symbol}: ${p.qty}sh ${gain>=0?'🟢 +':'🔴 '}${gain.toFixed(1)}%`;
         }).join('\n') || '• No open positions';
@@ -1144,6 +1199,19 @@ async function sendDailyPortfolioDigest() {
           `${stockLines}\n\n`;
       } catch(e) {}
     }
+
+    // 7b. Portfolio concentration risk (crypto + stocks combined)
+    let concentrationSection = '';
+    try {
+      const concentration = computeConcentrationRisk(holdings, alpacaPositionsForRisk);
+      if (concentration) {
+        concentrationSection =
+          `🧭 <b>Portfolio Concentration</b>\n` +
+          concentration.breakdown.map(b => `• ${b.name}: ${b.pct.toFixed(0)}%`).join('\n') +
+          (concentration.warning ? `\n\n${concentration.warning}` : '') +
+          `\n\n`;
+      }
+    } catch(e) { console.warn('[DAILY DIGEST] Concentration section failed:', e.message); }
 
     await sendTelegram(
       `📊 <b>KRAKN·AI Daily Portfolio Summary</b>\n` +
@@ -1162,6 +1230,8 @@ async function sendDailyPortfolioDigest() {
       `${weekTrades.length} trades · ${weekWins} wins · ${weekPnl >= 0 ? '+' : ''}A$${weekPnl.toFixed(2)} P&L\n\n` : '') +
 
       alpacaSection +
+
+      concentrationSection +
 
       `🌐 <b>Market Prices</b>\n` +
       `${watchSignals.join('\n')}\n\n` +
@@ -3949,8 +4019,8 @@ app.get('/api/currency/mode', requireAuth, (req, res) => {
 
 app.post('/api/currency/mode', requireAuth, (req, res) => {
   const { mode } = req.body;
-  if (!['AUD','USD','BOTH'].includes(mode)) {
-    return res.status(400).json({ error: 'mode must be AUD, USD or BOTH' });
+  if (!['AUD','USD','BOTH','STOCKS','ALL'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be AUD, USD, BOTH, STOCKS or ALL' });
   }
   botConfig.currencyMode = mode;
   saveData();
