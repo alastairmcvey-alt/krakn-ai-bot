@@ -255,6 +255,7 @@ const STOCKS = ['AAPL','NVDA','MSFT','TSLA','GOOGL','AMZN','META','SPY','QQQ'];
 const STOCK_COLORS = { AAPL:'#555555', NVDA:'#76B900', MSFT:'#00A4EF', TSLA:'#CC0000',
   GOOGL:'#4285F4', AMZN:'#FF9900', META:'#0082FB', SPY:'#1A6B3C', QQQ:'#9B30FF' };
 let marketMode = 'crypto'; // 'crypto' or 'stocks'
+let currencyMode = 'AUD'; // AUD | USD | BOTH | STOCKS | ALL — what the automated bot scans/trades
 let stockPrices = {}; // { AAPL: { price, change24h } }
 const DISP  = { XBTAUD:'BTC/AUD', ETHAUD:'ETH/AUD', SOLAUD:'SOL/AUD', XRPAUD:'XRP/AUD', ADAAUD:'ADA/AUD', LTCAUD:'LTC/AUD', LINKAUD:'LINK/AUD' };
 const SYMS  = { XBTAUD:'BTC', ETHAUD:'ETH', SOLAUD:'SOL', XRPAUD:'XRP', ADAAUD:'ADA', LTCAUD:'LTC', LINKAUD:'LINK' };
@@ -283,6 +284,28 @@ async function checkServer() {
     serverOnline = false;
     dot.className = 'status-dot offline';
     txt.textContent = cfg.serverUrl ? 'OFFLINE' : 'SETUP';
+  }
+}
+
+async function loadCurrencyMode() {
+  if (!serverOnline || !cfg.botToken) return;
+  try {
+    const r = await api('/api/currency/mode');
+    currencyMode = r.data.mode || 'AUD';
+  } catch {}
+}
+
+async function setTradingUniverse(mode) {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  if (!cfg.botToken)  { showToast('Add bot token in Settings'); return; }
+  try {
+    showToast('Updating trading universe...');
+    const r = await api('/api/currency/mode', { method:'POST', body: JSON.stringify({ mode }) });
+    currencyMode = mode;
+    showToast(`✓ Now watching ${r.data.activePairs} pairs (${mode})`);
+    renderSettings();
+  } catch(e) {
+    showToast('Error: ' + e.message);
   }
 }
 
@@ -318,7 +341,7 @@ function showTab(tab) {
   else if (tab==='signals')   renderSignals();
   else if (tab==='portfolio') renderPortfolio();
   else if (tab==='bot')       renderBot();
-  else if (tab==='settings')  renderSettings();
+  else if (tab==='settings')  { renderSettings(); loadCurrencyMode().then(() => { if (currentTab==='settings') renderSettings(); }); }
 }
 
 // ── Dashboard ──────────────────────────────────────────────────
@@ -919,6 +942,36 @@ function renderSettings() {
         <div class="field-label">Bot Secret Token</div>
         <input class="inp" id="sTok" type="password" placeholder="BOT_SECRET_TOKEN" value="${cfg.botToken}">
         <button class="trade-submit buy" onclick="saveServerCfg()" style="margin-top:4px">Save & Test Connection</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-section-title">Trading Universe</div>
+      <div class="card" style="padding:16px">
+        <div style="font-size:12px;color:var(--dim);line-height:1.6;margin-bottom:12px">
+          Controls which markets the automated bot scans and trades every 30 minutes.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+          ${['AUD','USD','BOTH'].map(m => `
+            <button onclick="setTradingUniverse('${m}')" style="
+              padding:10px 4px;border-radius:10px;font-family:var(--font-data);
+              font-size:11px;font-weight:600;letter-spacing:0.03em;cursor:pointer;
+              border:1px solid ${currencyMode===m?'var(--cyan)':'var(--border)'};
+              background:${currencyMode===m?'rgba(0,200,255,0.12)':'var(--surface)'};
+              color:${currencyMode===m?'var(--cyan)':'var(--dim)'}">${m}</button>`).join('')}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${['STOCKS','ALL'].map(m => `
+            <button onclick="setTradingUniverse('${m}')" style="
+              padding:10px 4px;border-radius:10px;font-family:var(--font-data);
+              font-size:11px;font-weight:600;letter-spacing:0.03em;cursor:pointer;
+              border:1px solid ${currencyMode===m?'var(--green)':'var(--border)'};
+              background:${currencyMode===m?'rgba(0,229,160,0.12)':'var(--surface)'};
+              color:${currencyMode===m?'var(--green)':'var(--dim)'}">${m==='STOCKS'?'📈 STOCKS':'🌐 ALL'}</button>`).join('')}
+        </div>
+        <div style="font-size:10px;color:var(--muted);font-family:var(--font-data);margin-top:10px;text-align:center">
+          Currently: <span style="color:var(--text)">${currencyMode}</span> · ALL includes crypto + 17 US stocks
+        </div>
       </div>
     </div>
 
