@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>KRAKN·AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void:    #050810;
+  --deep:    #080d1a;
+  --surface: #0b1628;
+  --lift:    #111f35;
+  --border:  rgba(0,200,255,0.10);
+  --cyan:    #00C8FF;
+  --green:   #00E5A0;
+  --red:     #FF3D6B;
+  --amber:   #F5A623;
+  --muted:   #4a6080;
+  --text:    #d8e8f5;
+  --dim:     #6a8aaa;
+  --font-data: 'JetBrains Mono', monospace;
+  --font-display: 'Syne', sans-serif;
+  --font-body: 'Inter', sans-serif;
+}
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; overflow:hidden; background:var(--void); color:var(--text); font-family:var(--font-body); }
+
+/* ─── Layout ─── */
+#app { display:flex; flex-direction:column; height:100vh; max-width:430px; margin:0 auto; position:relative; }
+.header { padding:16px 20px 12px; display:flex; align-items:center; justify-content:space-between; position:relative; z-index:10; border-bottom:1px solid var(--border); }
+.logo { font-family:var(--font-display); font-size:20px; letter-spacing:0.04em; color:#fff; display:flex; align-items:center; gap:6px; }
+.logo-dot { width:8px; height:8px; background:var(--cyan); border-radius:50%; animation:breathe 2s ease-in-out infinite; }
+@keyframes breathe { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.7)} }
+.status-pill { display:flex; align-items:center; gap:5px; padding:4px 10px; background:var(--surface); border:1px solid var(--border); border-radius:20px; font-family:var(--font-data); font-size:10px; color:var(--dim); letter-spacing:0.06em; cursor:pointer; }
+.status-dot { width:6px; height:6px; border-radius:50%; background:var(--muted); }
+.status-dot.online { background:var(--green); box-shadow:0 0 6px var(--green); }
+.status-dot.offline { background:var(--red); }
+
+.content { flex:1; overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch; }
+.content::-webkit-scrollbar { display:none; }
+
+/* ─── Bottom Nav ─── */
+.nav { position:fixed; bottom:0; left:50%; transform:translateX(-50%); width:100%; max-width:430px; background:rgba(5,8,16,0.96); backdrop-filter:blur(20px); border-top:1px solid var(--border); display:flex; padding:8px 0 max(8px, env(safe-area-inset-bottom)); z-index:100; }
+.nav-btn { flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:6px 0; background:none; border:none; color:var(--muted); cursor:pointer; transition:color 0.2s; }
+.nav-btn.active { color:var(--cyan); }
+.nav-icon { font-size:18px; line-height:1; }
+.nav-label { font-size:9px; font-family:var(--font-data); letter-spacing:0.08em; text-transform:uppercase; }
+
+/* ─── Cards ─── */
+.card { background:var(--surface); border:1px solid var(--border); border-radius:16px; overflow:hidden; }
+.section-label { font-family:var(--font-data); font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted); margin-bottom:10px; }
+
+/* ─── Markets Tab ─── */
+.markets-header { padding:16px 20px 0; }
+.coin-rail { display:flex; gap:8px; overflow-x:auto; padding:12px 20px; -webkit-overflow-scrolling:touch; }
+.coin-rail::-webkit-scrollbar { display:none; }
+.coin-chip { flex-shrink:0; padding:7px 14px; background:var(--surface); border:1px solid var(--border); border-radius:20px; font-family:var(--font-data); font-size:12px; color:var(--dim); cursor:pointer; transition:all 0.2s; white-space:nowrap; }
+.coin-chip.active { background:rgba(0,200,255,0.12); border-color:rgba(0,200,255,0.4); color:var(--cyan); }
+.coin-chip .chg { font-size:10px; }
+.coin-chip .chg.up { color:var(--green); }
+.coin-chip .chg.down { color:var(--red); }
+
+/* ─── Market Mode Toggle ─── */
+.market-toggle { display:flex; gap:6px; padding:0 20px; margin-bottom:8px; }
+.mkt-btn { flex:1; padding:7px; text-align:center; background:var(--surface); border:1px solid var(--border);
+  border-radius:10px; font-family:var(--font-data); font-size:10px; letter-spacing:0.08em;
+  color:var(--muted); cursor:pointer; transition:all 0.2s; }
+.mkt-btn.active { background:rgba(0,200,255,0.12); border-color:rgba(0,200,255,0.4); color:var(--cyan); }
+.mkt-btn.stocks.active { background:rgba(118,185,0,0.12); border-color:rgba(118,185,0,0.4); color:#76B900; }
+
+/* ─── Signal Arc (signature element) ─── */
+.signal-block { padding:0 20px 16px; }
+.signal-arc-wrap { position:relative; width:100%; display:flex; flex-direction:column; align-items:center; padding:24px 0 16px; background:var(--surface); border:1px solid var(--border); border-radius:16px; margin-bottom:12px; }
+.arc-svg { width:160px; height:90px; }
+.arc-track { fill:none; stroke:rgba(255,255,255,0.05); stroke-width:8; stroke-linecap:round; }
+.arc-fill { fill:none; stroke-width:8; stroke-linecap:round; transition:stroke-dashoffset 1s cubic-bezier(0.4,0,0.2,1), stroke 0.5s; }
+.arc-center { position:absolute; top:24px; left:50%; transform:translateX(-50%); text-align:center; }
+.arc-action { font-family:var(--font-display); font-size:28px; font-weight:800; line-height:1; }
+.arc-action.BUY { color:var(--green); }
+.arc-action.SELL { color:var(--red); }
+.arc-action.HOLD { color:var(--amber); }
+.arc-conf { font-family:var(--font-data); font-size:12px; color:var(--dim); margin-top:3px; }
+.signal-meta { display:flex; justify-content:space-between; padding:0 16px; width:100%; margin-top:8px; }
+.signal-stat { text-align:center; }
+.signal-stat-val { font-family:var(--font-data); font-size:13px; color:var(--text); }
+.signal-stat-key { font-size:10px; color:var(--muted); margin-top:2px; }
+.signal-reason { font-size:12px; color:var(--dim); text-align:center; padding:10px 20px 0; line-height:1.5; }
+
+/* ─── Price display ─── */
+.price-block { padding:0 20px; margin-bottom:12px; }
+.price-main { font-family:var(--font-data); font-size:36px; font-weight:600; color:#fff; letter-spacing:-0.02em; line-height:1; }
+.price-change { font-family:var(--font-data); font-size:13px; margin-top:4px; }
+.price-change.up { color:var(--green); }
+.price-change.down { color:var(--red); }
+
+/* ─── Chart ─── */
+.chart-wrap { margin:0 20px 12px; background:var(--surface); border:1px solid var(--border); border-radius:16px; overflow:hidden; }
+.chart-toolbar { display:flex; gap:4px; padding:10px 12px 0; }
+.tf-btn { font-family:var(--font-data); font-size:10px; padding:4px 8px; background:transparent; border:1px solid transparent; border-radius:6px; color:var(--muted); cursor:pointer; transition:all 0.2s; }
+.tf-btn.active { background:rgba(0,200,255,0.12); border-color:rgba(0,200,255,0.3); color:var(--cyan); }
+canvas { display:block; width:100% !important; }
+
+/* ─── Action buttons ─── */
+.action-row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; padding:0 20px 16px; }
+.action-btn { padding:12px 8px; border:none; border-radius:12px; font-family:var(--font-data); font-size:11px; font-weight:600; letter-spacing:0.06em; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:5px; transition:all 0.15s; }
+.action-btn:active { transform:scale(0.96); }
+.action-btn.buy  { background:rgba(0,229,160,0.15); color:var(--green); border:1px solid rgba(0,229,160,0.3); }
+.action-btn.sell { background:rgba(255,61,107,0.15); color:var(--red);   border:1px solid rgba(255,61,107,0.3); }
+.action-btn.send { background:rgba(0,200,255,0.12); color:var(--cyan);   border:1px solid rgba(0,200,255,0.25); }
+
+/* ─── On-chain strip ─── */
+.onchain-strip { margin:0 20px 80px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; display:flex; align-items:center; justify-content:space-between; }
+.onchain-label { font-family:var(--font-data); font-size:10px; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; }
+.onchain-val { font-size:12px; color:var(--dim); }
+.onchain-fetch { font-family:var(--font-data); font-size:10px; color:var(--cyan); cursor:pointer; letter-spacing:0.08em; }
+
+/* ─── Trade Tab ─── */
+.trade-wrap { padding:16px 20px 90px; }
+.seg-ctrl { display:flex; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:3px; margin-bottom:16px; }
+.seg-btn { flex:1; padding:8px; text-align:center; border:none; background:none; color:var(--muted); font-family:var(--font-data); font-size:12px; border-radius:9px; cursor:pointer; transition:all 0.2s; }
+.seg-btn.active.buy  { background:rgba(0,229,160,0.15); color:var(--green); }
+.seg-btn.active.sell { background:rgba(255,61,107,0.15); color:var(--red); }
+.field-label { font-family:var(--font-data); font-size:10px; color:var(--muted); letter-spacing:0.1em; margin-bottom:6px; text-transform:uppercase; }
+.inp { width:100%; background:var(--lift); border:1px solid var(--border); border-radius:10px; padding:12px 14px; color:#fff; font-family:var(--font-data); font-size:15px; margin-bottom:12px; outline:none; transition:border 0.2s; -webkit-appearance:none; }
+.inp:focus { border-color:var(--cyan); }
+select.inp { cursor:pointer; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.trade-submit { width:100%; padding:15px; border:none; border-radius:12px; font-family:var(--font-data); font-size:14px; font-weight:600; letter-spacing:0.06em; cursor:pointer; transition:all 0.15s; margin-top:4px; }
+.trade-submit:active { transform:scale(0.98); }
+.trade-submit.buy  { background:var(--green); color:#000; }
+.trade-submit.sell { background:var(--red);   color:#fff; }
+
+/* ─── Portfolio Tab ─── */
+.port-wrap { padding:0 0 90px; }
+.port-hero { padding:28px 20px 24px; background:linear-gradient(180deg,var(--deep) 0%,var(--void) 100%); text-align:center; border-bottom:1px solid var(--border); }
+.port-total { font-family:var(--font-data); font-size:42px; font-weight:600; color:#fff; letter-spacing:-0.02em; }
+.port-sub { font-size:12px; color:var(--muted); margin-top:4px; }
+.port-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--border); margin-bottom:20px; }
+.port-stat { background:var(--void); padding:14px; text-align:center; }
+.port-stat-val { font-family:var(--font-data); font-size:14px; margin-bottom:3px; }
+.port-stat-key { font-size:10px; color:var(--muted); }
+.holdings-list { padding:0 20px; }
+.holding { display:flex; align-items:center; gap:12px; padding:14px 0; border-bottom:1px solid var(--border); }
+.holding:last-child { border-bottom:none; }
+.holding-icon { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:var(--font-data); font-size:14px; font-weight:600; flex-shrink:0; }
+.holding-info { flex:1; }
+.holding-name { font-weight:600; font-size:14px; }
+.holding-qty  { font-family:var(--font-data); font-size:11px; color:var(--muted); margin-top:2px; }
+.holding-right { text-align:right; }
+.holding-val  { font-family:var(--font-data); font-size:14px; }
+.holding-pct  { font-family:var(--font-data); font-size:11px; margin-top:2px; }
+.up { color:var(--green); }
+.down { color:var(--red); }
+
+/* ─── Bot Tab ─── */
+.bot-wrap { padding:16px 20px 90px; }
+.bot-hero { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:20px; margin-bottom:14px; }
+.bot-status-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+.bot-title { font-family:var(--font-display); font-size:18px; font-weight:700; }
+.toggle { width:50px; height:28px; background:var(--lift); border-radius:14px; position:relative; cursor:pointer; transition:background 0.3s; border:1px solid var(--border); }
+.toggle.on { background:rgba(0,229,160,0.25); border-color:var(--green); }
+.toggle-knob { position:absolute; top:3px; left:3px; width:20px; height:20px; background:var(--muted); border-radius:50%; transition:all 0.3s; }
+.toggle.on .toggle-knob { left:25px; background:var(--green); }
+.bot-meta { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.bot-meta-item { background:var(--lift); border-radius:10px; padding:10px; }
+.bot-meta-val { font-family:var(--font-data); font-size:13px; color:var(--text); }
+.bot-meta-key { font-size:10px; color:var(--muted); margin-top:2px; }
+
+/* ─── Settings Tab ─── */
+.settings-wrap { padding:16px 20px 90px; }
+.settings-section { margin-bottom:20px; }
+.settings-section-title { font-family:var(--font-data); font-size:10px; color:var(--muted); letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px; }
+.settings-row { display:flex; align-items:center; justify-content:space-between; padding:13px 0; border-bottom:1px solid var(--border); }
+.settings-row:last-child { border-bottom:none; }
+.settings-row-label { font-size:14px; }
+.settings-row-sub { font-size:11px; color:var(--muted); margin-top:2px; }
+.settings-val { font-family:var(--font-data); font-size:13px; color:var(--cyan); }
+
+/* ─── Toast ─── */
+.toast { position:fixed; top:80px; left:50%; transform:translateX(-50%); background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px 18px; font-family:var(--font-data); font-size:12px; z-index:999; white-space:nowrap; max-width:90vw; text-align:center; animation:toastIn 0.3s ease; }
+@keyframes toastIn { from{opacity:0;top:60px} to{opacity:1;top:80px} }
+
+
+/* ─── Signal Cards ─── */
+.signal-row-card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px 16px; margin-bottom:10px; cursor:pointer; transition:border-color 0.2s; }
+.signal-row-card:active { border-color:rgba(0,200,255,0.3); }
+.sig-badge { display:inline-block; padding:4px 10px; border-radius:6px; font-family:var(--font-data); font-size:11px; font-weight:600; border:1px solid transparent; }
+
+/* ─── Misc ─── */
+.fade-in { animation:fadeIn 0.3s ease; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+.divider { height:1px; background:var(--border); margin:0 20px; }
+
+/* ─── Trade Sheet ─── */
+.trade-sheet { position:fixed; inset:0; z-index:200; }
+.sheet-backdrop { position:absolute; inset:0; background:rgba(0,0,0,0.7); backdrop-filter:blur(4px); }
+.sheet-body {
+  position:absolute; bottom:0; left:50%; transform:translate(-50%,100%);
+  width:100%; max-width:430px; background:var(--surface);
+  border-radius:20px 20px 0 0; border-top:1px solid var(--border);
+  padding:12px 20px 40px; transition:transform 0.35s cubic-bezier(0.32,0.72,0,1);
+}
+.sheet-handle { width:36px; height:4px; background:var(--lift); border-radius:2px; margin:0 auto 20px; }
+.sheet-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <div class="logo"><div class="logo-dot"></div>KRAKN·AI</div>
+    <div class="status-pill" onclick="checkServer()">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusTxt">SETUP</span>
+    </div>
+  </div>
+  <div class="content" id="content"></div>
+  <nav class="nav">
+    <button class="nav-btn active" id="nav-dashboard" onclick="showTab('dashboard')">
+      <div class="nav-icon">◈</div><div class="nav-label">Markets</div>
+    </button>
+    <button class="nav-btn" id="nav-signals" onclick="showTab('signals')">
+      <div class="nav-icon">⚡</div><div class="nav-label">Signals</div>
+    </button>
+    <button class="nav-btn" id="nav-portfolio" onclick="showTab('portfolio')">
+      <div class="nav-icon">◫</div><div class="nav-label">Portfolio</div>
+    </button>
+    <button class="nav-btn" id="nav-bot" onclick="showTab('bot')">
+      <div class="nav-icon">⟳</div><div class="nav-label">Bot</div>
+    </button>
+    <button class="nav-btn" id="nav-settings" onclick="showTab('settings')">
+      <div class="nav-icon">◉</div><div class="nav-label">Settings</div>
+    </button>
+  </nav>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────
+let currentTab = 'dashboard';
+let currentPair = 'XBTAUD';
+let currentTF = '1H';
+let tradeMode = 'buy';
+let serverOnline = false;
+let prices = {}, balance = {}, botStatus = {}, botCfg = {};
+
+const cfg = {
+  serverUrl: localStorage.getItem('serverUrl') || '',
+  botToken:  localStorage.getItem('botToken')  || '',
+};
+
+const PAIRS = ['XBTAUD','ETHAUD','SOLAUD','XRPAUD','ADAAUD','LTCAUD','LINKAUD'];
+const STOCKS = ['AAPL','NVDA','MSFT','TSLA','GOOGL','AMZN','META','SPY','QQQ'];
+const STOCK_COLORS = { AAPL:'#555555', NVDA:'#76B900', MSFT:'#00A4EF', TSLA:'#CC0000',
+  GOOGL:'#4285F4', AMZN:'#FF9900', META:'#0082FB', SPY:'#1A6B3C', QQQ:'#9B30FF' };
+let marketMode = 'crypto'; // 'crypto' or 'stocks'
+let currencyMode = 'AUD'; // AUD | USD | BOTH | STOCKS | ALL — what the automated bot scans/trades
+let stockPrices = {}; // { AAPL: { price, change24h } }
+const DISP  = { XBTAUD:'BTC/AUD', ETHAUD:'ETH/AUD', SOLAUD:'SOL/AUD', XRPAUD:'XRP/AUD', ADAAUD:'ADA/AUD', LTCAUD:'LTC/AUD', LINKAUD:'LINK/AUD' };
+const SYMS  = { XBTAUD:'BTC', ETHAUD:'ETH', SOLAUD:'SOL', XRPAUD:'XRP', ADAAUD:'ADA', LTCAUD:'LTC', LINKAUD:'LINK' };
+const COLORS = { BTC:'#F7931A', ETH:'#627EEA', SOL:'#9945FF', XRP:'#346AA9', ADA:'#0D9488', LTC:'#BFBBBB', LINK:'#2A5ADA' };
+
+// ── API ────────────────────────────────────────────────────────
+async function api(path, opts={}) {
+  if (!cfg.serverUrl) throw new Error('No server');
+  const url = cfg.serverUrl.replace(/\/$/,'') + path;
+  const headers = { 'Content-Type':'application/json' };
+  if (cfg.botToken) headers['Authorization'] = 'Bearer ' + cfg.botToken;
+  const res = await fetch(url, { ...opts, headers: { ...headers, ...(opts.headers||{}) } });
+  if (!res.ok) { const e = await res.json().catch(()=>({error:res.statusText})); throw new Error(e.error||res.statusText); }
+  return res.json();
+}
+
+async function checkServer() {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusTxt');
+  try {
+    const d = await api('/health');
+    serverOnline = true;
+    dot.className = 'status-dot online';
+    txt.textContent = d.keysConfigured ? 'LIVE' : 'NO KEYS';
+  } catch {
+    serverOnline = false;
+    dot.className = 'status-dot offline';
+    txt.textContent = cfg.serverUrl ? 'OFFLINE' : 'SETUP';
+  }
+}
+
+async function loadCurrencyMode() {
+  if (!serverOnline || !cfg.botToken) return;
+  try {
+    const r = await api('/api/currency/mode');
+    currencyMode = r.data.mode || 'AUD';
+  } catch {}
+}
+
+async function setTradingUniverse(mode) {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  if (!cfg.botToken)  { showToast('Add bot token in Settings'); return; }
+  try {
+    showToast('Updating trading universe...');
+    const r = await api('/api/currency/mode', { method:'POST', body: JSON.stringify({ mode }) });
+    currencyMode = mode;
+    showToast(`✓ Now watching ${r.data.activePairs} pairs (${mode})`);
+    renderSettings();
+  } catch(e) {
+    showToast('Error: ' + e.message);
+  }
+}
+
+async function refreshPrices() {
+  try {
+    if (cfg.serverUrl && serverOnline) {
+      const r = await api('/api/ticker?pairs=' + PAIRS.join(','));
+      prices = r.data || {};
+    } else {
+      const r = await fetch('https://api.kraken.com/0/public/Ticker?pair=' + PAIRS.join(','));
+      const j = await r.json();
+      for (const [k,v] of Object.entries(j.result||{})) {
+        prices[k] = { price:parseFloat(v.c[0]), change24h:+((parseFloat(v.c[0])-parseFloat(v.o))/parseFloat(v.o)*100).toFixed(2) };
+      }
+    }
+    if (currentTab==='dashboard') renderDashboard();
+  } catch {}
+}
+
+async function refreshBalance() {
+  if (!serverOnline||!cfg.botToken) return;
+  try { balance = (await api('/api/balance')).data||{}; } catch {}
+}
+
+// ── Tabs ───────────────────────────────────────────────────────
+function showTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('nav-'+tab)?.classList.add('active');
+  const c = document.getElementById('content');
+  c.innerHTML = '';
+  if (tab==='dashboard') renderDashboard();
+  else if (tab==='signals')   renderSignals();
+  else if (tab==='portfolio') renderPortfolio();
+  else if (tab==='bot')       renderBot();
+  else if (tab==='settings')  { renderSettings(); loadCurrencyMode().then(() => { if (currentTab==='settings') renderSettings(); }); }
+}
+
+// ── Dashboard ──────────────────────────────────────────────────
+function renderDashboard() {
+  const d = document.getElementById('content');
+  const p = getPair(currentPair);
+  const activePairs = marketMode === 'stocks' ? STOCKS : PAIRS;
+  const sym = marketMode === 'stocks' ? currentPair : (SYMS[currentPair]||'BTC');
+
+  // Build coin/stock chips
+  const chips = activePairs.map(pair => {
+    const pd = marketMode === 'stocks' ? stockPrices[pair] : getPair(pair);
+    const up = (pd?.change24h||0) >= 0;
+    const label = marketMode === 'stocks' ? pair : (SYMS[pair]||pair);
+    return `<div class="coin-chip ${pair===currentPair?'active':''}" onclick="selectPair('${pair}')">
+      ${label} <span class="chg ${up?'up':'down'}">${pd ? (up?'+':'')+pd.change24h+'%' : '--'}</span>
+    </div>`;
+  }).join('');
+
+  d.innerHTML = `<div class="fade-in">
+    <div class="market-toggle">
+      <div class="mkt-btn ${marketMode==='crypto'?'active':''}" onclick="setMarketMode('crypto')">◈ CRYPTO</div>
+      <div class="mkt-btn stocks ${marketMode==='stocks'?'active stocks':''}" onclick="setMarketMode('stocks')">📈 US STOCKS</div>
+    </div>
+    <div class="coin-rail">${chips}</div>
+
+    <div class="price-block">
+      <div class="price-main">${fmtPrice(p?.price||0, currentPair)}</div>
+      <div class="price-change ${(p?.change24h||0)>=0?'up':'down'}">${(p?.change24h||0)>=0?'▲':'▼'} ${Math.abs(p?.change24h||0)}% today</div>
+    </div>
+
+    <div class="chart-wrap">
+      <div class="chart-toolbar">
+        ${['1M','5M','15M','1H','4H','1D'].map(tf=>`<button class="tf-btn ${tf===currentTF?'active':''}" onclick="selectTF('${tf}')">${tf}</button>`).join('')}
+      </div>
+      <canvas id="mainChart" height="140"></canvas>
+    </div>
+
+    <div class="signal-block">
+      <div class="signal-arc-wrap" id="signalArc">
+        <svg class="arc-svg" viewBox="0 0 160 90">
+          <path class="arc-track" d="M 20 85 A 60 60 0 0 1 140 85"/>
+          <path class="arc-fill" id="arcFill" d="M 20 85 A 60 60 0 0 1 140 85" stroke="var(--amber)"
+            stroke-dasharray="188" stroke-dashoffset="188"/>
+        </svg>
+        <div class="arc-center" onclick="loadSignal(currentPair)" style="cursor:pointer" title="Tap to refresh">
+          <div class="arc-action HOLD" id="arcAction">--</div>
+          <div class="arc-conf" id="arcConf">--%</div>
+        </div>
+        <div class="signal-meta">
+          <div class="signal-stat">
+            <div class="signal-stat-val" id="sigRsi">--</div>
+            <div class="signal-stat-key">RSI</div>
+          </div>
+          <div class="signal-stat">
+            <div class="signal-stat-val" id="sigScore">--</div>
+            <div class="signal-stat-key">SCORE</div>
+          </div>
+          <div class="signal-stat">
+            <div class="signal-stat-val" id="sigRegime">--</div>
+            <div class="signal-stat-key">REGIME</div>
+          </div>
+        </div>
+        <div class="signal-reason" id="sigReason" onclick="loadSignal(currentPair)" style="cursor:pointer">Tap to load AI signal</div>
+      </div>
+    </div>
+
+    <div class="action-row">
+      <button class="action-btn buy" onclick="quickBuy()">▲ Buy ${sym}</button>
+      <button class="action-btn sell" onclick="quickSell()">▼ Sell ${sym}</button>
+      <button class="action-btn send" onclick="sendChartTG()">📊 Chart→TG</button>
+    </div>
+
+    <div class="onchain-strip">
+      <div>
+        <div class="onchain-label">On-Chain · ${sym}</div>
+        <div class="onchain-val" id="onchainVal">Tap fetch for whale data</div>
+      </div>
+      <div class="onchain-fetch" onclick="fetchOnChain()">FETCH ↗</div>
+    </div>
+  </div>`;
+
+  setTimeout(() => {
+    drawChart('mainChart', currentPair);
+    loadSignal(currentPair);
+  }, 60);
+}
+
+function getPair(pair) {
+  if (marketMode === 'stocks') return stockPrices[pair] || null;
+  for (const [k,v] of Object.entries(prices)) {
+    if (k === pair || k.includes(pair.replace('AUD','')) || DISP[pair]===DISP[k]) return v;
+  }
+  return null;
+}
+
+function fmtPrice(p, pair) {
+  const sym = (marketMode==='stocks' || pair?.endsWith('USD')) ? 'US$' : 'A$';
+  if (!p) return `${sym}--`;
+  if (p >= 1000) return sym + Math.round(p).toLocaleString('en-AU');
+  if (p >= 1)    return sym + parseFloat(p).toFixed(2);
+  return sym + parseFloat(p).toFixed(4);
+}
+
+function setMarketMode(mode) {
+  marketMode = mode;
+  if (mode === 'stocks') {
+    currentPair = 'AAPL';
+    fetchStockPrices();
+  } else {
+    currentPair = 'XBTAUD';
+  }
+  renderDashboard();
+}
+
+async function fetchStockPrices() {
+  if (!serverOnline || !cfg.botToken) return;
+  try {
+    const syms = STOCKS.slice(0, 6).join(',');
+    const r = await api(`/api/alpaca/quotes?symbols=${syms}`).catch(() => null);
+    if (r?.data) {
+      for (const [sym, data] of Object.entries(r.data)) {
+        stockPrices[sym] = { price: data.price, change24h: data.change24h || 0 };
+      }
+      if (currentTab === 'dashboard' && marketMode === 'stocks') renderDashboard();
+    }
+  } catch(e) {}
+}
+
+function selectPair(pair) {
+  currentPair = pair;
+  renderDashboard();
+}
+
+function selectTF(tf) {
+  currentTF = tf;
+  const map = { '1M':1,'5M':5,'15M':15,'1H':60,'4H':240,'1D':1440 };
+  drawChart('mainChart', currentPair, map[tf]||60);
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.toggle('active', b.textContent===tf));
+}
+
+// ── Signal Arc ─────────────────────────────────────────────────
+async function loadSignal(pair) {
+  const el = document.getElementById('sigReason');
+  if (el) el.textContent = 'Fetching signal...';
+  if (!serverOnline || !cfg.botToken) {
+    updateArc({ action:'HOLD', confidence:0, rsi:'--', weightedScore:0, regime:'--', signals:[] });
+    if (el) el.textContent = 'Connect server in Settings for AI signals';
+    return;
+  }
+  try {
+    const r = await api(`/api/signal/${pair}`);
+    if (r?.data) updateArc(r.data);
+  } catch(e) {
+    if (el) el.textContent = 'Tap here to refresh signal';
+  }
+}
+
+function updateArc(s) {
+  const action = s?.action || 'HOLD';
+  const conf   = s?.confidence || 0;
+  const rsi    = s?.rsi || '--';
+  const score  = s?.weightedScore?.toFixed?.(1) || '--';
+  const regime = s?.regime || '--';
+  const reason = s?.signals?.[0] || 'No dominant signal';
+
+  // Colour by action
+  const col = action==='BUY' ? 'var(--green)' : action==='SELL' ? 'var(--red)' : 'var(--amber)';
+
+  // Arc math: semicircle circumference = π × r = π × 60 ≈ 188
+  const circ  = 188;
+  const offset = circ - (conf / 100) * circ;
+
+  const fill = document.getElementById('arcFill');
+  const act  = document.getElementById('arcAction');
+  const confEl = document.getElementById('arcConf');
+
+  if (fill) { fill.style.stroke = col; fill.style.strokeDashoffset = offset; }
+  if (act)  { act.textContent = action; act.className = `arc-action ${action}`; }
+  if (confEl) confEl.textContent = conf + '%';
+
+  const rsiEl = document.getElementById('sigRsi');
+  const scoreEl = document.getElementById('sigScore');
+  const regimeEl = document.getElementById('sigRegime');
+  const reasonEl = document.getElementById('sigReason');
+  if (rsiEl) rsiEl.textContent = rsi;
+  if (scoreEl) scoreEl.textContent = score;
+  if (regimeEl) { regimeEl.textContent = regime; regimeEl.style.color = regime==='BULL'?'var(--green)':regime==='BEAR'?'var(--red)':'var(--amber)'; }
+  if (reasonEl) reasonEl.textContent = reason;
+}
+
+// ── Chart ──────────────────────────────────────────────────────
+async function drawChart(id, pair, interval=60) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  let candles = [];
+  try {
+    if (marketMode === 'stocks') {
+      // Alpaca stock bars via server
+      if (serverOnline && cfg.botToken) {
+        const r = await api(`/api/alpaca/bars/${pair}?interval=${interval}`);
+        candles = r?.data || [];
+      }
+    } else {
+      // Kraken crypto candles — direct public API
+      const r = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${interval}`);
+      const j = await r.json();
+      const key = Object.keys(j.result||{}).find(k=>k!=='last');
+      candles = j.result?.[key]?.slice(-80) || [];
+    }
+  } catch(e) { console.warn('Chart fetch failed:', e.message); }
+
+  const dpr = window.devicePixelRatio||1;
+  const W   = canvas.parentElement.offsetWidth;
+  const H   = 140;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  if (!candles.length) {
+    ctx.fillStyle = 'rgba(74,96,128,0.5)';
+    ctx.font = '11px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('No data', W/2, H/2);
+    return;
+  }
+
+  const closes = candles.map(c=>parseFloat(c[4]));
+  const highs  = candles.map(c=>parseFloat(c[2]));
+  const lows   = candles.map(c=>parseFloat(c[3]));
+  const opens  = candles.map(c=>parseFloat(c[1]));
+
+  const minP = Math.min(...lows);
+  const maxP = Math.max(...highs);
+  const range = maxP - minP || 1;
+  const pad   = 16;
+  const cW    = W / candles.length;
+
+  const toY = v => pad + ((maxP-v)/range) * (H-pad*2);
+  const toX = i => i * cW + cW/2;
+
+  candles.forEach((c,i) => {
+    const o=parseFloat(c[1]), cl=parseFloat(c[4]), h=parseFloat(c[2]), l=parseFloat(c[3]);
+    const bull = cl >= o;
+    const col  = bull ? '#00E5A0' : '#FF3D6B';
+    const bW   = Math.max(cW*0.6, 2);
+
+    // Wick
+    ctx.strokeStyle = col;
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(toX(i), toY(h));
+    ctx.lineTo(toX(i), toY(l));
+    ctx.stroke();
+
+    // Body
+    ctx.fillStyle = bull ? 'rgba(0,229,160,0.8)' : 'rgba(255,61,107,0.8)';
+    const y1 = toY(Math.max(o,cl));
+    const y2 = toY(Math.min(o,cl));
+    ctx.fillRect(toX(i)-bW/2, y1, bW, Math.max(y2-y1, 1));
+  });
+
+  // Last price line
+  const lastY = toY(closes[closes.length-1]);
+  ctx.setLineDash([3,3]);
+  ctx.strokeStyle = 'rgba(0,200,255,0.3)';
+  ctx.lineWidth   = 1;
+  ctx.beginPath(); ctx.moveTo(0,lastY); ctx.lineTo(W,lastY); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// ── Trade bottom sheet ─────────────────────────────────────────
+function quickBuy()  { openTradeSheet('buy'); }
+function quickSell() { openTradeSheet('sell'); }
+
+function openTradeSheet(mode) {
+  document.querySelector('.trade-sheet')?.remove();
+  const p = getPair(currentPair);
+  const price = p?.price || 0;
+  const sym = SYMS[currentPair] || 'BTC';
+  const sheet = document.createElement('div');
+  sheet.className = 'trade-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop" onclick="closeTradeSheet()"></div>
+    <div class="sheet-body">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <div style="font-family:var(--font-display);font-size:18px;font-weight:700">${mode==='buy'?'Buy':'Sell'} ${sym}</div>
+        <div style="font-family:var(--font-data);font-size:13px;color:var(--cyan)">${fmtPrice(price,currentPair)}</div>
+      </div>
+      <div class="seg-ctrl" style="margin-bottom:14px">
+        <button class="seg-btn ${mode==='buy'?'active buy':''}" onclick="sheetMode('buy',this)">▲ BUY</button>
+        <button class="seg-btn ${mode==='sell'?'active sell':''}" onclick="sheetMode('sell',this)">▼ SELL</button>
+      </div>
+      <div class="field-label">Order Type</div>
+      <select class="inp" id="sheetOrderType">
+        <option value="market">Market</option>
+        <option value="limit">Limit</option>
+        <option value="stop-loss">Stop Loss</option>
+      </select>
+      <div class="field-label">Amount (${sym})</div>
+      <input class="inp" id="sheetAmt" type="number" step="0.0001" value="0.001" oninput="sheetCalc(${price})">
+      <div class="field-label">Total: <span id="sheetTotal" style="color:var(--cyan)">A$${(price*0.001).toFixed(2)}</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
+        <button class="trade-submit" style="background:var(--lift);color:var(--dim);border:1px solid var(--border)" onclick="placeOrder(true)">Test</button>
+        <button class="trade-submit ${mode}" id="sheetSubmit" onclick="placeOrder(false)">${mode==='buy'?'▲ Buy':'▼ Sell'}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(sheet);
+  setTimeout(() => sheet.querySelector('.sheet-body').style.transform='translateY(0)', 10);
+}
+
+function closeTradeSheet() { document.querySelector('.trade-sheet')?.remove(); }
+
+function sheetMode(mode, btn) {
+  tradeMode = mode;
+  document.querySelectorAll('.trade-sheet .seg-btn').forEach(b=>b.classList.remove('active','buy','sell'));
+  btn.classList.add('active', mode);
+  const sub = document.getElementById('sheetSubmit');
+  if (sub) { sub.className=`trade-submit ${mode}`; sub.textContent=mode==='buy'?'▲ Buy':'▼ Sell'; }
+}
+
+function sheetCalc(price) {
+  const amt = parseFloat(document.getElementById('sheetAmt')?.value)||0;
+  const el  = document.getElementById('sheetTotal');
+  if (el) el.textContent = 'A$' + (amt*price).toFixed(2);
+}
+
+async function placeOrder(validate=false) {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  if (!cfg.botToken) { showToast('Add bot token in Settings'); return; }
+  const ordertype = document.getElementById('sheetOrderType')?.value || 'market';
+  const volume    = document.getElementById('sheetAmt')?.value || '0.001';
+  try {
+    showToast('Placing order...');
+    await api('/api/order/place', { method:'POST', body:JSON.stringify({
+      pair: currentPair, type: tradeMode, ordertype, volume, validate
+    })});
+    showToast(validate ? 'Order validated ✓' : 'Order placed ✓');
+    if (!validate) closeTradeSheet();
+  } catch(e) { showToast('Error: '+e.message); }
+}
+
+async function sendChartTG() {
+  if (!serverOnline||!cfg.botToken) { showToast('Connect server first'); return; }
+  try { await api(`/api/signal/telegram/${currentPair}`, {method:'POST'}); showToast('Chart sent to Telegram ✓'); }
+  catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function fetchOnChain() {
+  const el = document.getElementById('onchainVal');
+  if (!el) return;
+  el.textContent = 'Fetching...';
+  if (!serverOnline||!cfg.botToken) { el.textContent = 'Connect server for on-chain data'; return; }
+  try {
+    const sym = SYMS[currentPair]||'BTC';
+    const r = await api(`/api/onchain/${sym}`);
+    el.textContent = r.data?.summary || 'No data available';
+  } catch { el.textContent = 'On-chain data unavailable'; }
+}
+
+// ── Portfolio Tab ──────────────────────────────────────────────
+function renderPortfolio() {
+  const d = document.getElementById('content');
+  const entries = Object.entries(balance).filter(([,v])=>parseFloat(v)>0.000001);
+
+  // Kraken asset key normalisation
+  // ZAUD + AUDX = AUD cash, XXBT = BTC, XETH = ETH, etc
+  const AUD_CASH_KEYS = ['ZAUD','AUDX','AUD'];
+  const USD_CASH_KEYS = ['ZUSD','USD'];
+
+  let totalAUD = 0;
+  let audCashTotal = 0;
+
+  const holdings = [];
+
+  for (const [asset, qty] of entries) {
+    const q = parseFloat(qty);
+    if (q < 0.000001) continue;
+
+    // AUD cash — only ZAUD is directly tradeable
+    // AUDX is Kraken Earn (tokenised AUD) — show separately, not as trading cash
+    if (asset === 'ZAUD' || asset === 'AUD') {
+      audCashTotal += q;
+      totalAUD     += q;
+      continue;
+    }
+    // AUDX — Kraken Earn, show as holding not cash
+    if (asset === 'AUDX') {
+      totalAUD += q; // A$1 each
+      holdings.push({ sym:'AUDX', qty:q, val:q, pr:1, chg:0, asset, label:'Kraken Earn' });
+      continue;
+    }
+    // USD cash — skip display (small amounts)
+    if (USD_CASH_KEYS.includes(asset)) continue;
+    // Skip dust USDC
+    if (asset === 'USDC' && q < 1) continue;
+
+    // Normalise symbol — Kraken prefixes X for crypto, Z for fiat
+    const sym = asset
+      .replace(/^XX/,'')   // XXBT → XBT → BTC below
+      .replace(/^X/,'')    // XETH → ETH
+      .replace(/^Z/,'')    // ZAUD → AUD (handled above)
+      .replace('XBT','BTC');
+
+    // Find AUD price pair
+    const pairKey = Object.keys(prices).find(k =>
+      k === sym+'AUD' || k === 'X'+sym+'ZAUD' || k.includes(sym+'AUD')
+    );
+    const pr  = pairKey ? (prices[pairKey]?.price || 0) : 0;
+    const val = q * pr;
+    if (val < 0.50) continue; // skip dust
+
+    const chg = pairKey ? parseFloat(prices[pairKey]?.change24h || 0) : 0;
+    totalAUD += val;
+    holdings.push({ sym, qty:q, val, pr, chg, asset });
+  }
+
+  holdings.sort((a,b) => b.val - a.val);
+  const hasBalance = entries.length > 0 && serverOnline && cfg.botToken;
+
+  d.innerHTML = `<div class="port-wrap fade-in">
+    <div class="port-hero">
+      <div style="font-family:var(--font-data);font-size:11px;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:8px">Portfolio Value</div>
+      <div class="port-total">${hasBalance ? 'A$'+Math.round(totalAUD).toLocaleString() : 'A$---'}</div>
+      <div class="port-sub">${hasBalance ? 'Cash: A$'+Math.round(audCashTotal).toLocaleString()+' · Live from Kraken' : 'Connect server to see live balance'}</div>
+    </div>
+    <div class="port-stats">
+      <div class="port-stat">
+        <div class="port-stat-val" style="color:var(--cyan)">A$${Math.round(audCashTotal).toLocaleString()}</div>
+        <div class="port-stat-key">Available Cash</div>
+      </div>
+      <div class="port-stat">
+        <div class="port-stat-val">${holdings.length}</div>
+        <div class="port-stat-key">Positions</div>
+      </div>
+      <div class="port-stat">
+        <div class="port-stat-val" style="color:var(--cyan);cursor:pointer" onclick="showTab('settings')">View →</div>
+        <div class="port-stat-key">Performance</div>
+      </div>
+    </div>
+    <div class="holdings-list">
+      ${holdings.length > 0 ? holdings.map(h => `
+        <div class="holding" onclick="selectPair('${h.sym==='BTC'?'XBTAUD':h.sym+'AUD'}');showTab('dashboard')">
+          <div class="holding-icon" style="background:${COLORS[h.sym]||'#334155'}22;color:${COLORS[h.sym]||'#94A3B8'}">${h.sym.slice(0,1)}</div>
+          <div class="holding-info">
+            <div class="holding-name">${h.sym} ${h.label ? `<span style="font-size:10px;color:var(--muted);font-family:var(--font-data)">${h.label}</span>` : ''}</div>
+            <div class="holding-qty">${h.qty < 1 ? h.qty.toFixed(6) : h.qty.toFixed(4)} ${h.sym} · ${h.sym==='AUDX'?'A$1.00 each':'A$'+(h.pr >= 1000 ? Math.round(h.pr).toLocaleString() : h.pr.toFixed(4))}</div>
+          </div>
+          <div class="holding-right">
+            <div class="holding-val">A$${Math.round(h.val).toLocaleString()}</div>
+            <div class="holding-pct ${h.chg>=0?'up':'down'}">${h.chg>=0?'+':''}${h.chg.toFixed(2)}%</div>
+          </div>
+        </div>`).join('')
+      : `<div style="padding:40px 0;text-align:center;color:var(--muted);font-size:13px">
+          ${hasBalance ? 'No crypto holdings — cash ready to deploy' : 'Go to Settings → enter server URL and token'}
+        </div>`}
+      ${audCashTotal > 0 ? `
+        <div class="holding">
+          <div class="holding-icon" style="background:rgba(0,200,255,0.1);color:var(--cyan)">$</div>
+          <div class="holding-info">
+            <div class="holding-name">AUD Cash</div>
+            <div class="holding-qty">Available to trade</div>
+          </div>
+          <div class="holding-right">
+            <div class="holding-val">A$${Math.round(audCashTotal).toLocaleString()}</div>
+            <div class="holding-pct" style="color:var(--muted)">cash</div>
+          </div>
+        </div>` : ''}
+    </div>
+  </div>`;
+}
+
+// ── Bot Tab ────────────────────────────────────────────────────
+async function renderBot() {
+  const d = document.getElementById('content');
+  let status = botStatus;
+  let cfg2   = botCfg;
+  if (serverOnline&&cfg.botToken) {
+    try { status = (await api('/api/bot/status')).data||{}; botStatus=status; } catch {}
+    try { cfg2 = (await api('/api/bot/config')).data||{}; botCfg=cfg2; } catch {}
+  }
+  const running = status.running||false;
+
+  d.innerHTML = `<div class="bot-wrap fade-in">
+    <div class="bot-hero">
+      <div class="bot-status-row">
+        <div>
+          <div class="bot-title">Auto-Sell Bot</div>
+          <div style="font-size:12px;color:${running?'var(--green)':'var(--muted)'};margin-top:3px">${serverOnline?(running?'● RUNNING':'○ PAUSED'):'○ OFFLINE'}</div>
+        </div>
+        <div class="toggle ${running?'on':''}" onclick="toggleBot()">
+          <div class="toggle-knob"></div>
+        </div>
+      </div>
+      <div class="bot-meta">
+        <div class="bot-meta-item">
+          <div class="bot-meta-val">${cfg2.confidenceMin||65}%</div>
+          <div class="bot-meta-key">Min Confidence</div>
+        </div>
+        <div class="bot-meta-item">
+          <div class="bot-meta-val">${cfg2.stopLossPct||3}%</div>
+          <div class="bot-meta-key">Stop Loss</div>
+        </div>
+        <div class="bot-meta-item">
+          <div class="bot-meta-val">${cfg2.riskLevel||'moderate'}</div>
+          <div class="bot-meta-key">Risk Level</div>
+        </div>
+        <div class="bot-meta-item">
+          <div class="bot-meta-val">${cfg2.minHoldMinutes||120}m</div>
+          <div class="bot-meta-key">Min Hold</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label" style="padding:0 0 0 0">Bot Settings</div>
+    <div class="card" style="padding:16px;margin-bottom:14px">
+      <div class="field-label">Risk Level</div>
+      <select class="inp" id="bRisk">
+        <option value="conservative" ${(cfg2.riskLevel||'moderate')==='conservative'?'selected':''}>Conservative</option>
+        <option value="moderate" ${(cfg2.riskLevel||'moderate')==='moderate'?'selected':''}>Moderate</option>
+        <option value="aggressive" ${(cfg2.riskLevel||'moderate')==='aggressive'?'selected':''}>Aggressive</option>
+      </select>
+      <div class="grid2">
+        <div>
+          <div class="field-label">Min Confidence %</div>
+          <input class="inp" id="bConf" type="number" value="${cfg2.confidenceMin||65}" min="50" max="95">
+        </div>
+        <div>
+          <div class="field-label">Stop Loss %</div>
+          <input class="inp" id="bStop" type="number" value="${cfg2.stopLossPct||3}" min="1" max="15" step="0.5">
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <div class="field-label">Break-Even at %</div>
+          <input class="inp" id="bBreak" type="number" value="${cfg2.breakEvenTriggerPct||2}" min="1" max="10" step="0.5">
+        </div>
+        <div>
+          <div class="field-label">Min Hold (min)</div>
+          <input class="inp" id="bHold" type="number" value="${cfg2.minHoldMinutes||120}" min="30" max="1440">
+        </div>
+      </div>
+      <button class="trade-submit buy" onclick="saveBotSettings()" style="margin-top:4px">Save Settings</button>
+    </div>
+
+    <div class="card" style="padding:14px 16px;margin-bottom:14px">
+      <div style="font-size:12px;color:var(--dim);line-height:1.7">
+        <b style="color:var(--text)">How it works:</b><br>
+        The bot checks your holdings every 5 minutes. It exits a position when:<br>
+        🔴 Stop loss triggered (ATR-based)<br>
+        🟡 Break-even stop (price reverses after being up)<br>
+        🟢 Trailing stop locks in profit<br>
+        ⏰ Max hold time reached
+      </div>
+    </div>
+  </div>`;
+}
+
+async function toggleBot() {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  const running = botStatus.running||false;
+  try {
+    await api('/api/bot/'+(running?'stop':'start'), {method:'POST'});
+    botStatus.running = !running;
+    showToast(running ? 'Bot paused' : 'Bot started ✓');
+    renderBot();
+  } catch(e) { showToast('Error: '+e.message); }
+}
+
+async function saveBotSettings() {
+  const body = {
+    riskLevel:          document.getElementById('bRisk')?.value,
+    confidenceMin:      parseFloat(document.getElementById('bConf')?.value||65),
+    stopLossPct:        parseFloat(document.getElementById('bStop')?.value||3),
+    breakEvenTriggerPct:parseFloat(document.getElementById('bBreak')?.value||2),
+    minHoldMinutes:     parseInt(document.getElementById('bHold')?.value||120),
+  };
+  if (serverOnline&&cfg.botToken) {
+    try { await api('/api/bot/config', {method:'POST', body:JSON.stringify(body)}); }
+    catch {}
+  }
+  showToast('Settings saved ✓');
+}
+
+// ── Settings Tab ───────────────────────────────────────────────
+function renderSettings() {
+  const d = document.getElementById('content');
+  d.innerHTML = `<div class="settings-wrap fade-in">
+    <div class="settings-section">
+      <div class="settings-section-title">Server Connection</div>
+      <div class="card" style="padding:16px">
+        <div class="field-label">Server URL</div>
+        <input class="inp" id="sUrl" type="url" placeholder="https://your-server.railway.app" value="${cfg.serverUrl}">
+        <div class="field-label">Bot Secret Token</div>
+        <input class="inp" id="sTok" type="password" placeholder="BOT_SECRET_TOKEN" value="${cfg.botToken}">
+        <button class="trade-submit buy" onclick="saveServerCfg()" style="margin-top:4px">Save & Test Connection</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-section-title">Trading Universe</div>
+      <div class="card" style="padding:16px">
+        <div style="font-size:12px;color:var(--dim);line-height:1.6;margin-bottom:12px">
+          Controls which markets the automated bot scans and trades every 30 minutes.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+          ${['AUD','USD','BOTH'].map(m => `
+            <button onclick="setTradingUniverse('${m}')" style="
+              padding:10px 4px;border-radius:10px;font-family:var(--font-data);
+              font-size:11px;font-weight:600;letter-spacing:0.03em;cursor:pointer;
+              border:1px solid ${currencyMode===m?'var(--cyan)':'var(--border)'};
+              background:${currencyMode===m?'rgba(0,200,255,0.12)':'var(--surface)'};
+              color:${currencyMode===m?'var(--cyan)':'var(--dim)'}">${m}</button>`).join('')}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${['STOCKS','ALL'].map(m => `
+            <button onclick="setTradingUniverse('${m}')" style="
+              padding:10px 4px;border-radius:10px;font-family:var(--font-data);
+              font-size:11px;font-weight:600;letter-spacing:0.03em;cursor:pointer;
+              border:1px solid ${currencyMode===m?'var(--green)':'var(--border)'};
+              background:${currencyMode===m?'rgba(0,229,160,0.12)':'var(--surface)'};
+              color:${currencyMode===m?'var(--green)':'var(--dim)'}">${m==='STOCKS'?'📈 STOCKS':'🌐 ALL'}</button>`).join('')}
+        </div>
+        <div style="font-size:10px;color:var(--muted);font-family:var(--font-data);margin-top:10px;text-align:center">
+          Currently: <span style="color:var(--text)">${currencyMode}</span> · ALL includes crypto + 17 US stocks
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-section-title">Status</div>
+      <div class="card" style="padding:0 16px">
+        <div class="settings-row">
+          <div><div class="settings-row-label">Server</div></div>
+          <div class="settings-val" style="color:${serverOnline?'var(--green)':'var(--red)'}">${serverOnline?'ONLINE':'OFFLINE'}</div>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-row-label">API Keys</div></div>
+          <div class="settings-val">Kraken + Telegram</div>
+        </div>
+        <div class="settings-row" style="border:none">
+          <div><div class="settings-row-label">Performance</div><div class="settings-row-sub">Verified trade history</div></div>
+          <div class="settings-val" style="cursor:pointer" onclick="openPerformance()">VIEW →</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-section-title">Deployment</div>
+      <div class="card" style="padding:0 16px">
+        <div class="settings-row">
+          <div><div class="settings-row-label">Railway</div><div class="settings-row-sub">Host your server free</div></div>
+          <div class="settings-val" onclick="window.open('https://railway.app')" style="cursor:pointer">OPEN →</div>
+        </div>
+        <div class="settings-row" style="border:none">
+          <div><div class="settings-row-label">Kraken API Keys</div><div class="settings-row-sub">Get your API credentials</div></div>
+          <div class="settings-val" onclick="window.open('https://kraken.com/u/security/api')" style="cursor:pointer">OPEN →</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;padding:20px 0;font-family:var(--font-data);font-size:10px;color:var(--muted)">
+      KRAKN·AI v4.0 · Not financial advice
+    </div>
+  </div>`;
+}
+
+async function saveServerCfg() {
+  cfg.serverUrl = document.getElementById('sUrl')?.value?.trim().replace(/\/$/,'') || '';
+  cfg.botToken  = document.getElementById('sTok')?.value?.trim() || '';
+  localStorage.setItem('serverUrl', cfg.serverUrl);
+  localStorage.setItem('botToken',  cfg.botToken);
+  showToast('Testing connection...');
+  await checkServer();
+  showToast(serverOnline ? 'Connected ✓' : 'Cannot reach server');
+}
+
+function openPerformance() {
+  if (cfg.serverUrl) window.open(cfg.serverUrl + '/performance');
+  else showToast('Set server URL first');
+}
+
+// ── Toast ──────────────────────────────────────────────────────
+function showToast(msg, dur=3000) {
+  document.querySelector('.toast')?.remove();
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(), dur);
+}
+
+
+// ── Signals Tab ───────────────────────────────────────────────
+// Shows all coins' current signal at a glance — no AI calls, just the fast scan
+async function renderSignals() {
+  const d = document.getElementById('content');
+  const isStocks = marketMode === 'stocks';
+  const activePairs = isStocks ? STOCKS : PAIRS;
+  const label = isStocks ? 'US Stocks — Alpaca Paper' : 'Crypto — Kraken Live';
+  const accentColor = isStocks ? 'rgba(118,185,0,0.1)' : 'rgba(0,200,255,0.1)';
+  const borderColor = isStocks ? 'rgba(118,185,0,0.25)' : 'rgba(0,200,255,0.25)';
+  const textColor   = isStocks ? '#76B900' : 'var(--cyan)';
+  const marketNote  = isStocks
+    ? 'US market hours: 11:30pm–6am AEST · Bot scans every 30min during open hours'
+    : 'Bot scans every 30min · Tap Markets for full AI chart analysis';
+
+  d.innerHTML = `<div style="padding:16px 20px 90px" class="fade-in">
+    <div class="market-toggle" style="margin-bottom:12px">
+      <div class="mkt-btn ${!isStocks?'active':''}" onclick="setMarketMode('crypto');renderSignals()">◈ CRYPTO</div>
+      <div class="mkt-btn stocks ${isStocks?'active stocks':''}" onclick="setMarketMode('stocks');renderSignals()">📈 US STOCKS</div>
+    </div>
+    <div class="section-label">${label}</div>
+    <div id="signalsList">
+      ${activePairs.map(p=>`<div class="signal-row-card" id="sigcard-${p}" onclick="selectPair('${p}');showTab('dashboard')">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-weight:600;font-size:14px">${isStocks ? p : (DISP[p]||p)}</div>
+            <div style="font-family:var(--font-data);font-size:11px;color:var(--muted)" id="sigcard-price-${p}">Loading...</div>
+          </div>
+          <div style="text-align:right">
+            <div class="sig-badge" id="sigcard-action-${p}">--</div>
+            <div style="font-family:var(--font-data);font-size:11px;color:var(--muted);margin-top:3px" id="sigcard-conf-${p}">--%</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px" id="sigcard-reason-${p}">Scanning...</div>
+      </div>`).join('')}
+    </div>
+    <button style="width:100%;margin-top:12px;padding:12px;background:${accentColor};border:1px solid ${borderColor};border-radius:12px;color:${textColor};font-family:var(--font-data);font-size:12px;cursor:pointer;letter-spacing:0.06em" onclick="renderSignals()">↻ REFRESH ALL</button>
+    <div style="margin-top:10px;font-family:var(--font-data);font-size:10px;color:var(--muted);text-align:center">${marketNote}</div>
+  </div>`;
+
+  // Load signals for each pair
+  for (const pair of activePairs) {
+    try {
+      const priceEl  = document.getElementById(`sigcard-price-${pair}`);
+      const actionEl = document.getElementById(`sigcard-action-${pair}`);
+      const confEl   = document.getElementById(`sigcard-conf-${pair}`);
+      const reasonEl = document.getElementById(`sigcard-reason-${pair}`);
+
+      // Show price
+      if (isStocks) {
+        const sp = stockPrices[pair];
+        if (priceEl && sp) priceEl.textContent = `US$${sp.price?.toFixed(2)||'--'} · ${sp.change24h>=0?'+':''}${sp.change24h||0}%`;
+        else if (priceEl) priceEl.textContent = 'Tap refresh for price';
+      } else {
+        const p = getPair(pair);
+        if (priceEl && p) priceEl.textContent = fmtPrice(p.price, pair) + ' · ' + (p.change24h>=0?'+':'') + p.change24h + '%';
+      }
+
+      if (serverOnline && cfg.botToken) {
+        // Stocks use Alpaca signal endpoint, crypto uses Kraken signal endpoint
+        const endpoint = isStocks ? `/api/alpaca/signals?symbols=${pair}` : `/api/signal/${pair}`;
+        const r = await api(endpoint).catch(()=>null);
+        const s = isStocks ? r?.data?.[0] : r?.data;
+        if (s) {
+          const col = s.action==='BUY'?'var(--green)':s.action==='SELL'?'var(--red)':'var(--amber)';
+          if (actionEl) { actionEl.textContent=s.action; actionEl.style.background=col+'22'; actionEl.style.color=col; actionEl.style.borderColor=col+'44'; }
+          if (confEl)   confEl.textContent = s.confidence+'%';
+          if (reasonEl) reasonEl.textContent = isStocks
+            ? `RSI: ${s.rsi||'--'} · ${s.macd||'--'} · ${s.aboveMa20?'Above':'Below'} 20MA`
+            : (s.signals?.[0] || 'No dominant signal');
+        } else {
+          if (actionEl) actionEl.textContent = '--';
+          if (reasonEl) reasonEl.textContent = isStocks && !serverOnline ? 'Connect server' : 'No signal data';
+        }
+      } else {
+        if (actionEl) actionEl.textContent = '--';
+        if (reasonEl) reasonEl.textContent = 'Connect server for signals';
+      }
+    } catch {}
+    await new Promise(r=>setTimeout(r,300));
+  }
+}
+
+// ── Init ───────────────────────────────────────────────────────
+async function init() {
+  await checkServer();
+  await refreshPrices();
+  await refreshBalance();
+  renderDashboard();
+  setInterval(refreshPrices, 30000);
+  setInterval(checkServer, 60000);
+  setInterval(refreshBalance, 15000);
+}
+
+init();
+</script>
+</body>
+</html>
