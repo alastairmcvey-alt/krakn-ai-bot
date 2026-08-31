@@ -454,6 +454,7 @@ let alpacaPositions    = {}; // { AAPL: { qty, avgEntryPrice, entryTime } }
 let alpacaPeakPrices   = {}; // { AAPL: peakPrice } for trailing stop
 let alpacaBuyTimes     = {}; // { AAPL: timestamp }
 let alpacaBuyNotifyCache = {}; // cooldown per symbol
+let optionsBuyTimes    = {}; // { AAPL: timestamp } — separate cooldown for options trades
 
 // Fetch Alpaca account balance (buying power)
 async function getAlpacaBuyingPower() {
@@ -631,6 +632,57 @@ async function checkStockOpportunities() {
       );
     }
   } catch(e) { console.error('[STOCK CHECK ERROR]', e.message); }
+}
+
+// Scheduled options opportunity check — reuses the existing options
+// engine (fetchOptionsChain / selectOptionsContract / placeOptionsOrder /
+// executeOptionsStrategy) which was fully built but never actually
+// scheduled anywhere. This is the hackathon-required options integration,
+// now genuinely autonomous instead of only reachable via manual API call.
+async function checkOptionsOpportunities() {
+  if (!ALPACA_KEY || !ALPACA_SECRET || !isMarketOpen()) {
+    if (!isMarketOpen()) console.log('[OPTIONS CHECK] Market closed — skipping');
+    return;
+  }
+  try {
+    console.log('[OPTIONS CHECK] Scanning for options opportunities...');
+    const candidates = await scanOptionsOpportunities();
+    if (!candidates.length) { console.log('[OPTIONS CHECK] No qualifying opportunities this run'); return; }
+
+    const best = candidates.sort((a, b) => b.confidence - a.confidence)[0];
+    console.log(`[OPTIONS CHECK] Best candidate: ${best.symbol} ${best.signal} ${best.confidence}% RSI:${best.rsi}`);
+
+    const threshold = botConfig.autoBuyMinConfidence || 82;
+    if (best.confidence < threshold) {
+      console.log(`[OPTIONS CHECK] ${best.symbol}: ${best.confidence}% below threshold ${threshold}% — skip`);
+      return;
+    }
+
+    // Cooldown — don't re-trade the same underlying within 4 hours
+    const lastTrade = optionsBuyTimes[best.symbol] || 0;
+    if (Date.now() - lastTrade < 4 * 60 * 60 * 1000) {
+      console.log(`[OPTIONS CHECK] ${best.symbol} in cooldown`); return;
+    }
+
+    const signal = { action: best.signal, confidence: best.confidence, rsi: best.rsi };
+
+    // Auto-buy or manual prompt — same gating pattern as stock trading
+    if (botConfig.autoBuy) {
+      const order = await executeOptionsStrategy(best.symbol, signal, best.price);
+      if (order) {
+        optionsBuyTimes[best.symbol] = Date.now();
+        console.log(`[OPTIONS AUTO-BUY] ${best.symbol} — order placed`);
+      }
+    } else {
+      await sendTelegram(
+        `⚙️ <b>OPTIONS OPPORTUNITY</b>\n\n` +
+        `<b>${best.symbol}</b> — ${best.signal} signal ${best.confidence}%\n` +
+        `RSI: ${best.rsi} | Price: US$${best.price.toFixed(2)}\n\n` +
+        `Auto-buy is off — this trade was not placed.\n` +
+        `Enable Auto-Buy in Bot settings for autonomous options execution.`
+      );
+    }
+  } catch(e) { console.error('[OPTIONS CHECK ERROR]', e.message); }
 }
 
 // Stock position monitor — runs with auto-sell bot, same 3-stage stop system
@@ -2540,9 +2592,12 @@ function scheduleBuyCheck() {
     catch(e) { console.error('[BUY CHECK] Interval error:', e.message); }
     try { await checkStockOpportunities(); }
     catch(e) { console.error('[STOCK CHECK] Interval error:', e.message); }
+    try { await checkOptionsOpportunities(); }
+    catch(e) { console.error('[OPTIONS CHECK] Interval error:', e.message); }
   }, 30 * 60 * 1000);
   console.log('[BUY CHECK] Scheduled every 30min (independent of advisor interval)');
   console.log('[STOCK CHECK] Scheduled every 30min alongside crypto buy check');
+  console.log('[OPTIONS CHECK] Scheduled every 30min alongside stock buy check');
 }
 
 async function runAdvisor() {
@@ -6928,6 +6983,7 @@ app.listen(PORT, async () => {
   setTimeout(registerTelegramWebhook,                                          3  * 1000); // 3s  — lightweight
   setTimeout(async () => { try { await checkBuyOpportunity(); }    catch(e){} }, 90 * 1000); // 1.5min — first buy check
   setTimeout(async () => { try { await checkStockOpportunities(); } catch(e){} }, 95 * 1000); // first stock check
+  setTimeout(async () => { try { await checkOptionsOpportunities(); } catch(e){} }, 100 * 1000); // first options check
   setTimeout(async () => { try { await recordPortfolioSnapshot();} catch(e){} }, 2  * 60 * 1000); // 2min
   setTimeout(async () => { try { await checkVolumeAnomalies(); }   catch(e){} }, 3  * 60 * 1000); // 3min
   setTimeout(async () => { try { await checkMacroEvents(); }        catch(e){} }, 4  * 60 * 1000); // 4min
