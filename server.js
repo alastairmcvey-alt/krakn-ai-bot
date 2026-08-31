@@ -2538,8 +2538,11 @@ function scheduleBuyCheck() {
   buyCheckTimer = setInterval(async () => {
     try { await checkBuyOpportunity(); }
     catch(e) { console.error('[BUY CHECK] Interval error:', e.message); }
+    try { await checkStockOpportunities(); }
+    catch(e) { console.error('[STOCK CHECK] Interval error:', e.message); }
   }, 30 * 60 * 1000);
   console.log('[BUY CHECK] Scheduled every 30min (independent of advisor interval)');
+  console.log('[STOCK CHECK] Scheduled every 30min alongside crypto buy check');
 }
 
 async function runAdvisor() {
@@ -6924,6 +6927,7 @@ app.listen(PORT, async () => {
   // Railway health check window = 30s. Server must respond to /health first.
   setTimeout(registerTelegramWebhook,                                          3  * 1000); // 3s  — lightweight
   setTimeout(async () => { try { await checkBuyOpportunity(); }    catch(e){} }, 90 * 1000); // 1.5min — first buy check
+  setTimeout(async () => { try { await checkStockOpportunities(); } catch(e){} }, 95 * 1000); // first stock check
   setTimeout(async () => { try { await recordPortfolioSnapshot();} catch(e){} }, 2  * 60 * 1000); // 2min
   setTimeout(async () => { try { await checkVolumeAnomalies(); }   catch(e){} }, 3  * 60 * 1000); // 3min
   setTimeout(async () => { try { await checkMacroEvents(); }        catch(e){} }, 4  * 60 * 1000); // 4min
