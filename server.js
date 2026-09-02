@@ -145,7 +145,8 @@ function getActivePairs(mode) {
 // ─── Alpaca API Client ─────────────────────────────────────────
 async function alpacaRequest(path, method = 'GET', body = null, dataApi = false) {
   if (!ALPACA_KEY || !ALPACA_SECRET) throw new Error('Alpaca keys not configured');
-  const base = dataApi ? ALPACA_DATA_URL : ALPACA_BASE_URL;
+  const tradingBase = ALPACA_PAPER ? 'https://paper-api.alpaca.markets/v2' : ALPACA_BASE_URL;
+  const base = dataApi ? ALPACA_DATA_URL : tradingBase;
   const url  = `${base}${path}`;
   const opts = {
     method,
@@ -2072,7 +2073,7 @@ async function checkVolumeAnomalies() {
       const anomaly = detectVolumeAnomaly(volumes);
       if (!anomaly) continue;
 
-      const ticker   = await fetchSingleTicker(pair);
+      const ticker   = await fetchTickerUniversal(pair);
       const price    = ticker?.price || 0;
       const priceDir = closes[closes.length-1] > closes[closes.length-4] ? '📈 Rising' : '📉 Falling';
       const patterns = detectCandlePatterns(candles);
