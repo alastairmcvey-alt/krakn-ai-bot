@@ -986,9 +986,13 @@ function renderSettings() {
           <div><div class="settings-row-label">API Keys</div></div>
           <div class="settings-val">Kraken + Telegram</div>
         </div>
-        <div class="settings-row" style="border:none">
+        <div class="settings-row">
           <div><div class="settings-row-label">Performance</div><div class="settings-row-sub">Verified trade history</div></div>
           <div class="settings-val" style="cursor:pointer" onclick="openPerformance()">VIEW →</div>
+        </div>
+        <div class="settings-row" style="border:none">
+          <div><div class="settings-row-label">Shadow Book</div><div class="settings-row-sub">Every trade considered — taken or declined</div></div>
+          <div class="settings-val" style="cursor:pointer" onclick="openShadowBook()">VIEW →</div>
         </div>
       </div>
     </div>
@@ -1026,6 +1030,60 @@ async function saveServerCfg() {
 function openPerformance() {
   if (cfg.serverUrl) window.open(cfg.serverUrl + '/performance');
   else showToast('Set server URL first');
+}
+
+async function openShadowBook() {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  if (!cfg.botToken)  { showToast('Add bot token in Settings'); return; }
+
+  document.querySelector('.trade-sheet')?.remove();
+  const sheet = document.createElement('div');
+  sheet.className = 'trade-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop" onclick="closeTradeSheet()"></div>
+    <div class="sheet-body" style="max-height:78vh;overflow-y:auto;padding-bottom:24px">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <div style="font-family:var(--font-display);font-size:18px;font-weight:700">Shadow Book</div>
+        <div style="font-family:var(--font-data);font-size:11px;color:var(--muted)">Taken vs. declined</div>
+      </div>
+      <div id="shadowBookList" style="display:flex;flex-direction:column;gap:8px">
+        <div style="text-align:center;padding:30px 0;color:var(--muted);font-family:var(--font-data);font-size:12px">Loading...</div>
+      </div>
+    </div>`;
+  document.body.appendChild(sheet);
+  setTimeout(() => sheet.querySelector('.sheet-body').style.transform='translateY(0)', 10);
+
+  try {
+    const r = await api('/api/shadowbook?limit=60');
+    const entries = r.data || [];
+    const list = document.getElementById('shadowBookList');
+    if (!list) return;
+    if (!entries.length) {
+      list.innerHTML = `<div style="text-align:center;padding:30px 0;color:var(--muted);font-family:var(--font-data);font-size:12px">No entries yet</div>`;
+      return;
+    }
+    const marketIcon = { crypto:'◈', stock:'📈', option:'⚙️' };
+    list.innerHTML = entries.map(e => {
+      const col = e.action==='BUY' ? 'var(--green)' : e.action==='SELL' ? 'var(--red)' : 'var(--amber)';
+      const when = new Date(e.ts);
+      const timeStr = when.toLocaleDateString('en-AU',{day:'2-digit',month:'short'}) + ' ' + when.toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
+      return `<div style="background:var(--lift);border-radius:10px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:13px;font-weight:600">${marketIcon[e.market]||''} ${e.symbol}
+            <span style="color:${col};font-family:var(--font-data);font-size:11px;margin-left:6px">${e.action} ${e.confidence}%</span>
+          </div>
+          <div style="font-size:10px;color:var(--muted);font-family:var(--font-data);margin-top:2px">${e.reason||''} · ${timeStr}</div>
+        </div>
+        <div style="font-family:var(--font-data);font-size:10px;font-weight:600;padding:3px 8px;border-radius:6px;
+          background:${e.taken?'rgba(0,229,160,0.15)':'rgba(74,96,128,0.15)'};
+          color:${e.taken?'var(--green)':'var(--muted)'}">${e.taken?'TAKEN':'SKIP'}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    const list = document.getElementById('shadowBookList');
+    if (list) list.innerHTML = `<div style="text-align:center;padding:30px 0;color:var(--red);font-family:var(--font-data);font-size:12px">Error: ${e.message}</div>`;
+  }
 }
 
 // ── Toast ──────────────────────────────────────────────────────
