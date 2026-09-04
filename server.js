@@ -5439,6 +5439,113 @@ ${rows}
   } catch(e) { res.status(500).send('<h1 style="color:white;background:#050810;padding:40px">Performance loading... try again in a moment.</h1>'); }
 });
 
+app.get('/shadowbook', async (req, res) => {
+  try {
+    const entries = shadowBook.slice(0, 100);
+    const taken   = entries.filter(e => e.taken).length;
+    const skipped = entries.length - taken;
+    const byMarket = { crypto:0, stock:0, option:0 };
+    entries.forEach(e => { if (byMarket[e.market] !== undefined) byMarket[e.market]++; });
+
+    const marketLabel = { crypto:'Crypto', stock:'Stock', option:'Option' };
+    const marketIcon  = { crypto:'◈', stock:'📈', option:'⚙️' };
+
+    const rows = entries.map(e => `
+      <tr class="${e.taken?'win':'loss'}">
+        <td style="font-size:11px;color:#64748B">${new Date(e.ts).toLocaleDateString('en-AU')} ${new Date(e.ts).toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'})}</td>
+        <td>${marketIcon[e.market]||''} ${marketLabel[e.market]||e.market}</td>
+        <td><b>${e.symbol}</b></td>
+        <td style="color:${e.action==='BUY'?'#00C896':e.action==='SELL'?'#FF4466':'#F5A623'};font-family:monospace">
+          ${e.action} ${e.confidence}%</td>
+        <td style="font-size:11px;color:#64748B">${e.reason||''}</td>
+        <td>${e.taken?'🟢 TAKEN':'⚪ SKIP'}</td>
+      </tr>`).join('');
+
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta property="og:title" content="KRAKN·AI — Shadow Book">
+<meta property="og:description" content="Every trade decision KRAKN·AI has made, taken or declined. ${entries.length} recent decisions, ${taken} taken.">
+<title>KRAKN·AI — Shadow Book</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050810;color:#fff;font-family:'Inter',sans-serif;padding:32px 4vw 80px}
+.logo{font-family:'Space Mono',monospace;font-size:24px;font-weight:700;
+  background:linear-gradient(135deg,#fff 40%,#00D4FF);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.badge{display:inline-block;padding:3px 10px;background:rgba(0,200,150,0.1);border:1px solid rgba(0,200,150,0.25);
+  border-radius:20px;font-size:10px;color:#00C896;font-family:'Space Mono',monospace;letter-spacing:0.1em;margin-left:10px;vertical-align:middle}
+.sub{color:#64748B;font-size:13px;margin:8px 0 32px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:32px}
+.card{background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.12);border-radius:14px;padding:18px;text-align:center}
+.val{font-family:'Space Mono',monospace;font-size:24px;font-weight:700;margin-bottom:4px}
+.key{font-size:10px;color:#64748B;text-transform:uppercase;letter-spacing:0.1em}
+.green{color:#00C896}.red{color:#FF4466}.cyan{color:#00D4FF}
+h2{font-family:'Space Mono',monospace;font-size:13px;color:#00D4FF;letter-spacing:0.12em;
+  text-transform:uppercase;margin:32px 0 14px;padding-bottom:10px;border-bottom:1px solid rgba(0,212,255,0.1)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{padding:8px 12px;color:#64748B;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;
+  text-align:left;border-bottom:1px solid rgba(0,212,255,0.1)}
+td{padding:10px 12px;border-bottom:1px solid rgba(0,212,255,0.05)}
+tr.win td:first-child{border-left:3px solid #00C896}
+tr.loss td:first-child{border-left:3px solid rgba(255,255,255,0.1)}
+.disclaimer{margin-top:40px;padding:16px 20px;background:rgba(255,255,255,0.02);
+  border-radius:10px;font-size:11px;color:#64748B;line-height:1.8}
+@media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div>
+  <span class="logo">KRAKN·AI</span>
+  <span class="badge">✓ SHADOW BOOK</span>
+</div>
+<div class="sub">Every trade decision, taken or declined — crypto, stocks, and options alike · ${new Date().toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'})} AEST</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="val">${entries.length}</div>
+    <div class="key">Decisions Logged</div>
+  </div>
+  <div class="card">
+    <div class="val green">${taken}</div>
+    <div class="key">Taken</div>
+  </div>
+  <div class="card">
+    <div class="val">${skipped}</div>
+    <div class="key">Declined</div>
+  </div>
+  <div class="card">
+    <div class="val cyan">${byMarket.crypto}</div>
+    <div class="key">◈ Crypto</div>
+  </div>
+  <div class="card">
+    <div class="val cyan">${byMarket.stock}</div>
+    <div class="key">📈 Stocks</div>
+  </div>
+  <div class="card">
+    <div class="val cyan">${byMarket.option}</div>
+    <div class="key">⚙️ Options</div>
+  </div>
+</div>
+
+<h2>Decision Log — Last ${entries.length} Evaluations</h2>
+${entries.length>0?`<table>
+<tr><th>Time</th><th>Market</th><th>Symbol</th><th>Signal</th><th>Reason</th><th>Outcome</th></tr>
+${rows}
+</table>`:'<p style="color:#64748B;font-size:13px">No decisions logged yet — check back once the bot has run a scan cycle.</p>'}
+
+<div class="disclaimer">
+  ℹ️ The Shadow Book is a transparent, append-only record of every trade KRAKN·AI evaluates —
+  including opportunities it declined because they didn't clear its confidence threshold.
+  It exists to show the reasoning behind what the bot does <i>and</i> doesn't act on, not just its executed trades.
+</div>
+</body>
+</html>`);
+  } catch(e) { res.status(500).send('<h1 style="color:white;background:#050810;padding:40px">Shadow Book loading... try again in a moment.</h1>'); }
+});
+
 app.post('/api/performance/report', requireAuth, async (req, res) => {
   res.json({ success:true, message:'Generating report — check Telegram!' });
   try {
