@@ -567,6 +567,7 @@ async function checkStockOpportunities() {
         const signal = await computeStockSignal(sym);
         const threshold = botConfig.confidenceMin || 65;
         console.log(`[STOCK CHECK] ${sym}: ${signal.action} ${signal.confidence}% RSI:${signal.rsi} — ${signal.action==='BUY'&&signal.confidence>=threshold?'✅':'skip'}`);
+        logShadowEntry('stock', sym, signal.action, signal.confidence, `RSI:${signal.rsi}`, signal.action==='BUY'&&signal.confidence>=threshold);
         if (signal.action === 'BUY' && signal.confidence >= threshold) {
           if (!bestStock || signal.confidence > bestScore) {
             bestStock = signal;
@@ -650,6 +651,10 @@ async function checkOptionsOpportunities() {
     const candidates = await scanOptionsOpportunities();
     if (!candidates.length) { console.log('[OPTIONS CHECK] No qualifying opportunities this run'); return; }
 
+    for (const cand of candidates) {
+      logShadowEntry('option', cand.symbol, cand.signal, cand.confidence, `RSI:${cand.rsi}`, false);
+    }
+
     const best = candidates.sort((a, b) => b.confidence - a.confidence)[0];
     console.log(`[OPTIONS CHECK] Best candidate: ${best.symbol} ${best.signal} ${best.confidence}% RSI:${best.rsi}`);
 
@@ -673,6 +678,7 @@ async function checkOptionsOpportunities() {
       if (order) {
         optionsBuyTimes[best.symbol] = Date.now();
         console.log(`[OPTIONS AUTO-BUY] ${best.symbol} — order placed`);
+        logShadowEntry('option', best.symbol, best.signal, best.confidence, `RSI:${best.rsi} — EXECUTED`, true);
       }
     } else {
       await sendTelegram(
@@ -882,6 +888,28 @@ let selectedPairForChat   = 'XBTAUD'; // tracks last coin mentioned in Telegram
 // ─── P&L Tracking ──────────────────────────────────────────────
 // Stores every trade we make through the bot for P&L calculation
 let tradeLog = []; // { id, pair, sym, type, volume, price, valueAUD, timestamp, source, signalConditions }
+
+// ─── Shadow Book ────────────────────────────────────────────
+// Logs every trade decision the bot makes — including ones it
+// declines. Pure observability: this NEVER feeds back into any
+// BUY/SELL/skip decision, it only records what already happened.
+let shadowBook = []; // { ts, market, symbol, action, confidence, reason, taken }
+const SHADOW_BOOK_MAX = 300;
+
+function logShadowEntry(market, symbol, action, confidence, reason, taken) {
+  try {
+    shadowBook.unshift({
+      ts: new Date().toISOString(),
+      market,   // 'crypto' | 'stock' | 'option'
+      symbol,
+      action,   // 'BUY' | 'SELL' | 'HOLD'
+      confidence,
+      reason,
+      taken,    // was this actually executed?
+    });
+    if (shadowBook.length > SHADOW_BOOK_MAX) shadowBook.length = SHADOW_BOOK_MAX;
+  } catch(e) { /* logging must never break the trading loop */ }
+}
 let pnlByAsset = {}; // { BTC: { avgBuyPrice, totalBought, totalSold, realised } }
 
 // Signal learning weights — adjusted over time based on what works
@@ -1382,6 +1410,7 @@ function saveData() {
       gridConfigs, rebalanceConfig,
       waitlistSignups,
       signalWeights, tradeOutcomes,
+      shadowBook: shadowBook.slice(0, 300),
       botRunning: botState.running,
       savedAt: new Date().toISOString(),
     };
@@ -1439,6 +1468,7 @@ function loadData() {
       if (data.waitlistSignups)     waitlistSignups     = data.waitlistSignups;
       if (data.signalWeights)       Object.assign(signalWeights, data.signalWeights);
       if (data.tradeOutcomes)       tradeOutcomes       = data.tradeOutcomes;
+      if (data.shadowBook)          shadowBook          = data.shadowBook;
       // Auto-restart bot if it was running before the server restarted
       // Delay 3 minutes — well past Railway health check window (30s)
       // and past vision analysis startup tasks
@@ -2753,6 +2783,7 @@ async function checkBuyOpportunity() {
 
         const threshold = botConfig.confidenceMin;
         console.log(`[BUY CHECK] ${pair}: ${action} ${rawConf.toFixed(0)}% RSI:${tf60.rsi} ws:${weightedScore.toFixed(1)} — ${action==='BUY'&&rawConf>=threshold?'✅ CANDIDATE':'skip'}`);
+        logShadowEntry('crypto', pair, action, Math.round(rawConf), `RSI:${tf60.rsi} score:${weightedScore.toFixed(1)}`, action==='BUY'&&rawConf>=threshold);
 
         if (action === 'BUY' && rawConf >= threshold) {
           const ticker = await fetchSingleTicker(pair);
@@ -5868,6 +5899,10 @@ app.post('/api/bot/config', requireAuth, (req, res) => {
   res.json({ success:true, data:botConfig });
 });
 app.get('/api/bot/status',  requireAuth, (req, res) => res.json({ success:true, data:botState }));
+app.get('/api/shadowbook',  requireAuth, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 300);
+  res.json({ success:true, data: shadowBook.slice(0, limit), total: shadowBook.length });
+});
 
 app.post('/api/bot/start', requireAuth, requireKeys, (req, res) => {
   if (botState.running) return res.json({ success:true, message:'Already running' });
