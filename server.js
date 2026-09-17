@@ -600,6 +600,13 @@ async function checkStockOpportunities() {
 
     // Auto-buy or manual prompt
     if (botConfig.autoBuy && bestStock.confidence >= botConfig.autoBuyMinConfidence) {
+      const tradeValueAUD = (qty * ticker.price) * 1.55; // rough USD→AUD for the exposure check
+      const exposureCheck = await checkExposureCap(tradeValueAUD, 'Stock');
+      if (!exposureCheck.allowed) {
+        console.log(`[EXPOSURE CAP] ${bestStock.symbol} blocked — ${exposureCheck.reason}`);
+        logShadowEntry('stock', bestStock.symbol, 'BUY', bestStock.confidence, `Blocked by exposure cap: ${exposureCheck.reason}`, false);
+        return;
+      }
       try {
         const order = await placeAlpacaStockOrder(bestStock.symbol, 'buy', qty);
         alpacaBuyTimes[bestStock.symbol] = Date.now();
@@ -674,6 +681,16 @@ async function checkOptionsOpportunities() {
 
     // Auto-buy or manual prompt — same gating pattern as stock trading
     if (botConfig.autoBuy) {
+      // Rough premium estimate (contract pricing isn't finalised until inside
+      // executeOptionsStrategy) — conservative approximation for the exposure
+      // check only, ~3% of notional for a near-the-money short-dated contract
+      const estimatedPremiumAUD = (best.price * 100 * 0.03) * 1.55;
+      const exposureCheck = await checkExposureCap(estimatedPremiumAUD, 'Options');
+      if (!exposureCheck.allowed) {
+        console.log(`[EXPOSURE CAP] ${best.symbol} options blocked — ${exposureCheck.reason}`);
+        logShadowEntry('option', best.symbol, best.signal, best.confidence, `Blocked by exposure cap: ${exposureCheck.reason}`, false);
+        return;
+      }
       const order = await executeOptionsStrategy(best.symbol, signal, best.price);
       if (order) {
         optionsBuyTimes[best.symbol] = Date.now();
@@ -690,6 +707,71 @@ async function checkOptionsOpportunities() {
       );
     }
   } catch(e) { console.error('[OPTIONS CHECK ERROR]', e.message); }
+}
+
+// ─── Portfolio Exposure Cap ─────────────────────────────────
+// Hard, mechanical limits checked BEFORE any buy executes.
+// Distinct from computeConcentrationRisk (which only reports,
+// in the daily digest, after the fact) — this one can actually
+// block a trade. Fails open (allows the trade) if the check
+// itself errors, so a bug here never becomes a bigger outage.
+async function checkExposureCap(proposedValueAUD, marketLabel) {
+  try {
+    const maxTradePct = botConfig.maxTradePct || 20;          // max % of total portfolio in one single trade
+    const maxTotalPct = botConfig.maxTotalExposurePct || 90;  // max % of total portfolio actually invested (vs cash)
+
+    // ── Kraken side: cash vs invested ──
+    let krakenCashAUD = 0, krakenInvestedAUD = 0;
+    try {
+      const balance = await krakenPrivateRequest('Balance');
+      for (const [asset, qty] of Object.entries(balance)) {
+        const amount = parseFloat(qty);
+        if (amount < 0.000001) continue;
+        if (asset === 'ZAUD' || asset === 'AUD') { krakenCashAUD += amount; continue; }
+        const sym  = asset.replace(/^X/, '').replace(/Z$/, '').replace('XBT','BTC');
+        const pair = AUD_PAIRS.find(p => p.replace('AUD','') === sym);
+        if (!pair) continue;
+        const ticker = await fetchSingleTicker(pair);
+        if (ticker) krakenInvestedAUD += amount * ticker.price;
+      }
+    } catch(e) { console.warn('[EXPOSURE CAP] Kraken balance fetch failed:', e.message); }
+
+    // ── Alpaca side: cash vs invested ──
+    let alpacaCashAUD = 0, alpacaInvestedAUD = 0;
+    try {
+      const acct = await getAlpacaBuyingPower();
+      alpacaCashAUD     = (acct.cash || 0) * 1.55;      // rough USD→AUD, matches existing conversion pattern
+      alpacaInvestedAUD = ((acct.portfolioValue || 0) - (acct.cash || 0)) * 1.55;
+    } catch(e) { console.warn('[EXPOSURE CAP] Alpaca account fetch failed:', e.message); }
+
+    const totalPortfolioAUD = krakenCashAUD + krakenInvestedAUD + alpacaCashAUD + alpacaInvestedAUD;
+    if (totalPortfolioAUD < 1) return { allowed: true }; // nothing to measure against yet — don't block on no data
+
+    const totalInvestedAUD = krakenInvestedAUD + alpacaInvestedAUD;
+
+    // Check 1: is this single trade too big a slice of the whole portfolio?
+    const tradePct = (proposedValueAUD / totalPortfolioAUD) * 100;
+    if (tradePct > maxTradePct) {
+      return {
+        allowed: false,
+        reason: `${marketLabel} trade is ${tradePct.toFixed(1)}% of total portfolio — exceeds max single-trade cap of ${maxTradePct}%`
+      };
+    }
+
+    // Check 2: would this trade push total invested exposure too high (too little cash left)?
+    const projectedInvestedPct = ((totalInvestedAUD + proposedValueAUD) / totalPortfolioAUD) * 100;
+    if (projectedInvestedPct > maxTotalPct) {
+      return {
+        allowed: false,
+        reason: `Would push total invested exposure to ${projectedInvestedPct.toFixed(1)}% — exceeds max total exposure cap of ${maxTotalPct}%`
+      };
+    }
+
+    return { allowed: true };
+  } catch(e) {
+    console.warn('[EXPOSURE CAP] Check failed, allowing trade by default:', e.message);
+    return { allowed: true }; // fail-open — a bug in this check should never itself block all trading
+  }
 }
 
 // Stock position monitor — runs with auto-sell bot, same 3-stage stop system
@@ -893,12 +975,13 @@ let tradeLog = []; // { id, pair, sym, type, volume, price, valueAUD, timestamp,
 // Logs every trade decision the bot makes — including ones it
 // declines. Pure observability: this NEVER feeds back into any
 // BUY/SELL/skip decision, it only records what already happened.
-let shadowBook = []; // { ts, market, symbol, action, confidence, reason, taken }
+let shadowBook = []; // { ts, market, symbol, action, confidence, reason, taken, hash, previousHash }
+let lastShadowHash = 'GENESIS'; // chain anchor — persisted so the chain survives restarts
 const SHADOW_BOOK_MAX = 300;
 
 function logShadowEntry(market, symbol, action, confidence, reason, taken) {
   try {
-    shadowBook.unshift({
+    const entry = {
       ts: new Date().toISOString(),
       market,   // 'crypto' | 'stock' | 'option'
       symbol,
@@ -906,10 +989,39 @@ function logShadowEntry(market, symbol, action, confidence, reason, taken) {
       confidence,
       reason,
       taken,    // was this actually executed?
-    });
+      previousHash: lastShadowHash,
+    };
+    // Hash covers the entry's own content plus the previous hash —
+    // changing any past entry breaks every hash after it, so tampering
+    // is detectable, not just theoretically prevented.
+    entry.hash = crypto.createHash('sha256').update(JSON.stringify(entry)).digest('hex');
+    lastShadowHash = entry.hash;
+
+    shadowBook.unshift(entry);
     if (shadowBook.length > SHADOW_BOOK_MAX) shadowBook.length = SHADOW_BOOK_MAX;
   } catch(e) { /* logging must never break the trading loop */ }
 }
+
+// Verifies the chain is intact — recomputes each entry's hash from its
+// content and checks it both matches what's stored AND correctly links
+// to the next entry's previousHash. Returns the first break found, if any.
+function verifyShadowChain() {
+  // shadowBook is newest-first, so walk it oldest-first for chain order
+  const chronological = [...shadowBook].reverse();
+  for (let i = 0; i < chronological.length; i++) {
+    const entry = chronological[i];
+    const { hash, ...rest } = entry;
+    const recomputed = crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex');
+    if (recomputed !== hash) {
+      return { intact: false, brokenAt: i, symbol: entry.symbol, ts: entry.ts };
+    }
+    if (i > 0 && entry.previousHash !== chronological[i-1].hash) {
+      return { intact: false, brokenAt: i, symbol: entry.symbol, ts: entry.ts, reason: 'link mismatch' };
+    }
+  }
+  return { intact: true, entriesChecked: chronological.length };
+}
+
 let pnlByAsset = {}; // { BTC: { avgBuyPrice, totalBought, totalSold, realised } }
 
 // Signal learning weights — adjusted over time based on what works
@@ -1040,6 +1152,8 @@ let botConfig = {
   currencyMode:         'ALL', // crypto + US stocks — bot trades both markets autonomously
   autoBuy:              false,
   autoBuyMaxAUD:        200,
+  maxTradePct:          20,  // hard cap: no single trade can exceed this % of total portfolio value
+  maxTotalExposurePct:  90,  // hard cap: total invested (vs cash) can't exceed this % across both brokers
   autoBuyMinConfidence: 82,
 
   // ── Notification Settings ─────────────────────────────────
@@ -1411,6 +1525,7 @@ function saveData() {
       waitlistSignups,
       signalWeights, tradeOutcomes,
       shadowBook: shadowBook.slice(0, 300),
+      lastShadowHash,
       botRunning: botState.running,
       savedAt: new Date().toISOString(),
     };
@@ -1469,6 +1584,7 @@ function loadData() {
       if (data.signalWeights)       Object.assign(signalWeights, data.signalWeights);
       if (data.tradeOutcomes)       tradeOutcomes       = data.tradeOutcomes;
       if (data.shadowBook)          shadowBook          = data.shadowBook;
+      if (data.lastShadowHash)      lastShadowHash      = data.lastShadowHash;
       // Auto-restart bot if it was running before the server restarted
       // Delay 3 minutes — well past Railway health check window (30s)
       // and past vision analysis startup tasks
@@ -2134,15 +2250,50 @@ async function fetchSentimentScore(sym) {
   const fallback = { score: 0, label: 'Unknown', reasons: [], fetchedAt: Date.now() };
 
   try {
-    const prompt = `Score crypto sentiment for ${sym} from -10 to +10. Return ONLY this JSON, nothing else:
-{"score":3,"label":"Mildly Bullish","reasons":["reason1"]}`;
+    // ── Step 1: grounded research call (WITH web_search) ──────
+    // Ask for a plain-text summary, not JSON — tool_use responses
+    // often leave no text in the same turn a strict JSON format
+    // would need, which was the root cause of the old failures.
+    const searchController = new AbortController();
+    const searchTimeout    = setTimeout(() => searchController.abort(), 25000);
 
-    const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 25000);
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const searchResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      signal: controller.signal,
+      signal: searchController.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 400,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{
+          role: 'user',
+          content: `Search for the latest news on ${sym} cryptocurrency from the last 24 hours. ` +
+                    `Summarise what you find in 2-3 plain sentences — no formatting, no JSON, just the facts.`
+        }]
+      })
+    });
+    clearTimeout(searchTimeout);
+
+    const searchData = await searchResponse.json();
+    const newsContext = (searchData.content || [])
+      .filter(c => c.type === 'text').map(c => c.text).join(' ').trim();
+
+    if (!newsContext) throw new Error('No news context returned from search step');
+
+    // ── Step 2: strict scoring call (NO tools) ─────────────────
+    // No tool attached here, so this call reliably returns plain
+    // text every time — the JSON extraction has nothing competing
+    // against it.
+    const scoreController = new AbortController();
+    const scoreTimeout    = setTimeout(() => scoreController.abort(), 15000);
+
+    const scoreResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: scoreController.signal,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -2151,19 +2302,22 @@ async function fetchSentimentScore(sym) {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 150,
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{ role: 'user', content: prompt }]
+        messages: [{
+          role: 'user',
+          content: `Based on this news summary about ${sym}: "${newsContext}"\n\n` +
+                    `Score sentiment from -10 to +10. Return ONLY this JSON, nothing else:\n` +
+                    `{"score":3,"label":"Mildly Bullish","reasons":["reason1"]}`
+        }]
       })
     });
-    clearTimeout(timeout);
+    clearTimeout(scoreTimeout);
 
-    const data = await response.json();
-    const text = (data.content || [])
+    const scoreData = await scoreResponse.json();
+    const text = (scoreData.content || [])
       .filter(c => c.type === 'text').map(c => c.text).join('').trim();
 
-    if (!text) throw new Error('Empty response');
+    if (!text) throw new Error('Empty response from scoring step');
 
-    // Extract JSON even if Claude adds surrounding text
     const match = text.match(/\{[\s\S]*?\}/);
     if (!match) throw new Error('No JSON in response');
 
@@ -3008,6 +3162,13 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
     if (botConfig.autoBuy &&
         bestOpportunity.confidence >= botConfig.autoBuyMinConfidence &&
         suggestedAUD <= botConfig.autoBuyMaxAUD) {
+
+      const exposureCheck = await checkExposureCap(suggestedAUD, 'Crypto');
+      if (!exposureCheck.allowed) {
+        console.log(`[EXPOSURE CAP] ${bestOpportunity.displayPair} blocked — ${exposureCheck.reason}`);
+        logShadowEntry('crypto', bestOpportunity.pair, 'BUY', bestOpportunity.confidence, `Blocked by exposure cap: ${exposureCheck.reason}`, false);
+        return false;
+      }
 
       try {
         console.log(`[AUTO-BUY] Executing ${bestOpportunity.displayPair} — ${bestOpportunity.confidence}% confidence`);
@@ -5070,13 +5231,63 @@ async function fetchBenchmarkData() {
 // ══════════════════════════════════════════════════════════════
 // PERFORMANCE REPORT — Full intelligence on bot improvement
 // ══════════════════════════════════════════════════════════════
+// ─── Max Drawdown ───────────────────────────────────────────
+// Largest peak-to-trough decline in the portfolio value series.
+function calcMaxDrawdown(history) {
+  if (!history || history.length < 2) return null;
+  let peak = history[0].valueAUD;
+  let maxDD = 0;
+  let peakDate = history[0].date, troughDate = history[0].date;
+  let worstPeakDate = peakDate, worstTroughDate = troughDate;
+  for (const point of history) {
+    if (point.valueAUD > peak) { peak = point.valueAUD; peakDate = point.date; }
+    const dd = peak > 0 ? ((point.valueAUD - peak) / peak) * 100 : 0;
+    if (dd < maxDD) { maxDD = dd; worstPeakDate = peakDate; worstTroughDate = point.date; }
+  }
+  return { maxDrawdownPct: parseFloat(maxDD.toFixed(2)), peakDate: worstPeakDate, troughDate: worstTroughDate };
+}
+
+// ─── Sharpe & Sortino Ratios ────────────────────────────────
+// Computed from period-over-period returns between portfolio
+// snapshots (currently ~6-hourly). Not strictly annualised in
+// the textbook sense since snapshot spacing varies slightly —
+// treated as a relative quality signal, not a precise industry figure.
+function calcSharpeSortino(history) {
+  if (!history || history.length < 3) return null;
+  const returns = [];
+  for (let i = 1; i < history.length; i++) {
+    const prev = history[i-1].valueAUD, curr = history[i].valueAUD;
+    if (prev > 0) returns.push((curr - prev) / prev);
+  }
+  if (returns.length < 2) return null;
+
+  const mean = returns.reduce((s,r) => s+r, 0) / returns.length;
+  const variance = returns.reduce((s,r) => s + Math.pow(r-mean, 2), 0) / returns.length;
+  const stdDev = Math.sqrt(variance);
+
+  const downside = returns.filter(r => r < 0);
+  const downsideVariance = downside.length
+    ? downside.reduce((s,r) => s + Math.pow(r, 2), 0) / downside.length
+    : 0;
+  const downsideDev = Math.sqrt(downsideVariance);
+
+  const sharpe  = stdDev > 0 ? (mean / stdDev) : null;
+  const sortino = downsideDev > 0 ? (mean / downsideDev) : (mean > 0 ? null : 0);
+
+  return {
+    sharpe:  sharpe  !== null ? parseFloat(sharpe.toFixed(2))  : null,
+    sortino: sortino !== null ? parseFloat(sortino.toFixed(2)) : null,
+    sampleSize: returns.length,
+  };
+}
+
 async function calculatePerformance(days = 30) {
   try {
     const now   = Date.now();
     const start = now - days * 24 * 60 * 60 * 1000;
 
     // Portfolio value progression
-    const relevant = portfolioHistory.filter(p => p.timestamp >= start);
+    const relevant = portfolioHistory.filter(p => new Date(p.timestamp).getTime() >= start);
     let portfolioReturn = null;
     if (relevant.length >= 2) {
       const first = relevant[0], last = relevant[relevant.length-1];
@@ -5150,6 +5361,8 @@ async function calculatePerformance(days = 30) {
     return {
       period: days, generated: new Date().toISOString(),
       portfolio: portfolioReturn, btcReturn,
+      maxDrawdown: calcMaxDrawdown(relevant),
+      riskMetrics: calcSharpeSortino(relevant),
       alpha: portfolioReturn && btcReturn !== null
         ? parseFloat((portfolioReturn.returnPct - btcReturn).toFixed(2)) : null,
       trades: {
@@ -5317,10 +5530,36 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
 // ── Public performance page — no auth, safe to share ──────────
 app.get('/performance', async (req, res) => {
   try {
-    const perf  = await calculatePerformance(90);
+    const perf   = await calculatePerformance(90);
+    const perf7  = await calculatePerformance(7);
+    const perf30 = await calculatePerformance(30);
     const trades = tradeOutcomes.slice(-50).reverse();
     const t      = perf?.trades || {};
     const prog   = perf?.learning?.progression;
+    const dd     = perf?.maxDrawdown;
+    const risk   = perf?.riskMetrics;
+
+    // ── Equity curve (inline SVG, no external chart lib needed) ──
+    function buildEquityCurveSVG(history) {
+      if (!history || history.length < 2) return null;
+      const W = 900, H = 220, pad = 30;
+      const values = history.map(h => h.valueAUD);
+      const min = Math.min(...values), max = Math.max(...values);
+      const range = (max - min) || 1;
+      const toX = i => pad + (i / (history.length - 1)) * (W - pad*2);
+      const toY = v => H - pad - ((v - min) / range) * (H - pad*2);
+      const points = history.map((h,i) => `${toX(i)},${toY(h.valueAUD)}`).join(' ');
+      const rising = values[values.length-1] >= values[0];
+      const lineColor = rising ? '#00C896' : '#FF4466';
+      const areaPoints = `${pad},${H-pad} ${points} ${W-pad},${H-pad}`;
+      return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">
+        <polygon points="${areaPoints}" fill="${lineColor}" opacity="0.08"/>
+        <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="2"/>
+        <text x="${pad}" y="16" fill="#64748B" font-size="10" font-family="monospace">A$${Math.round(max).toLocaleString()}</text>
+        <text x="${pad}" y="${H-pad+18}" fill="#64748B" font-size="10" font-family="monospace">A$${Math.round(min).toLocaleString()}</text>
+      </svg>`;
+    }
+    const equityCurveSVG = buildEquityCurveSVG(perf?.portfolio?.history);
 
     const rows = trades.map(o => `
       <tr class="${o.won?'win':'loss'}">
@@ -5418,6 +5657,37 @@ tr.loss td:first-child{border-left:3px solid #FF4466}
     <div class="val ${perf.alpha>=0?'green':'red'}">${perf.alpha>=0?'+':''}${perf.alpha.toFixed(2)}%</div>
     <div class="key">Alpha vs BTC</div>
   </div>`:''}
+  ${dd?`<div class="card">
+    <div class="val ${dd.maxDrawdownPct>=-10?'':'red'}">${dd.maxDrawdownPct.toFixed(1)}%</div>
+    <div class="key">Max Drawdown</div>
+  </div>`:''}
+  ${risk?.sharpe!==null&&risk?.sharpe!==undefined?`<div class="card">
+    <div class="val ${risk.sharpe>=0.5?'green':risk.sharpe>=0?'':'red'}">${risk.sharpe.toFixed(2)}</div>
+    <div class="key">Sharpe Ratio</div>
+  </div>`:''}
+  ${risk?.sortino!==null&&risk?.sortino!==undefined?`<div class="card">
+    <div class="val ${risk.sortino>=0.5?'green':risk.sortino>=0?'':'red'}">${risk.sortino.toFixed(2)}</div>
+    <div class="key">Sortino Ratio</div>
+  </div>`:''}
+</div>
+
+${equityCurveSVG?`<h2>Equity Curve — Last ${perf.portfolio.dataPoints} Snapshots</h2>
+<div class="card" style="padding:16px">${equityCurveSVG}</div>`:''}
+
+<h2>Rolling Win Rate</h2>
+<div class="grid">
+  <div class="card">
+    <div class="val ${(perf7?.trades?.winRate||0)>=55?'green':(perf7?.trades?.winRate||0)>=45?'':'red'}">${(perf7?.trades?.winRate||0).toFixed(1)}%</div>
+    <div class="key">Last 7 Days (${perf7?.trades?.closed||0} trades)</div>
+  </div>
+  <div class="card">
+    <div class="val ${(perf30?.trades?.winRate||0)>=55?'green':(perf30?.trades?.winRate||0)>=45?'':'red'}">${(perf30?.trades?.winRate||0).toFixed(1)}%</div>
+    <div class="key">Last 30 Days (${perf30?.trades?.closed||0} trades)</div>
+  </div>
+  <div class="card">
+    <div class="val">${(t.winRate||0).toFixed(1)}%</div>
+    <div class="key">Last 90 Days (${t.closed||0} trades)</div>
+  </div>
 </div>
 
 <h2>Learning Progression</h2>
@@ -5446,20 +5716,31 @@ app.get('/shadowbook', async (req, res) => {
     const skipped = entries.length - taken;
     const byMarket = { crypto:0, stock:0, option:0 };
     entries.forEach(e => { if (byMarket[e.market] !== undefined) byMarket[e.market]++; });
+    const chainStatus = verifyShadowChain();
 
     const marketLabel = { crypto:'Crypto', stock:'Stock', option:'Option' };
     const marketIcon  = { crypto:'◈', stock:'📈', option:'⚙️' };
 
-    const rows = entries.map(e => `
-      <tr class="${e.taken?'win':'loss'}">
-        <td style="font-size:11px;color:#64748B">${new Date(e.ts).toLocaleDateString('en-AU')} ${new Date(e.ts).toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'})}</td>
-        <td>${marketIcon[e.market]||''} ${marketLabel[e.market]||e.market}</td>
-        <td><b>${e.symbol}</b></td>
-        <td style="color:${e.action==='BUY'?'#00C896':e.action==='SELL'?'#FF4466':'#F5A623'};font-family:monospace">
-          ${e.action} ${e.confidence}%</td>
-        <td style="font-size:11px;color:#64748B">${e.reason||''}</td>
-        <td>${e.taken?'🟢 TAKEN':'⚪ SKIP'}</td>
-      </tr>`).join('');
+    const reasonCards = entries.map(e => {
+      const actionColor = e.action==='BUY' ? '#00C896' : e.action==='SELL' ? '#FF4466' : '#F5A623';
+      const barWidth = Math.min(100, Math.max(0, e.confidence || 0));
+      const hashSnippet = e.hash ? e.hash.slice(0, 10) : '—';
+      return `
+      <div class="rcard ${e.taken?'rcard-taken':''}">
+        <div class="rcard-top">
+          <div class="rcard-symbol">${marketIcon[e.market]||''} <b>${e.symbol}</b>
+            <span class="rcard-market">${marketLabel[e.market]||e.market}</span></div>
+          <div class="rcard-outcome">${e.taken?'🟢 TAKEN':'⚪ SKIP'}</div>
+        </div>
+        <div class="rcard-action" style="color:${actionColor}">${e.action} <span class="rcard-conf">${e.confidence}%</span></div>
+        <div class="rcard-bar-track"><div class="rcard-bar-fill" style="width:${barWidth}%;background:${actionColor}"></div></div>
+        <div class="rcard-reason">${e.reason||'No reason recorded'}</div>
+        <div class="rcard-footer">
+          <span>${new Date(e.ts).toLocaleDateString('en-AU')} ${new Date(e.ts).toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'})}</span>
+          <span class="rcard-hash" title="Chain hash — links to the previous entry">#${hashSnippet}</span>
+        </div>
+      </div>`;
+    }).join('');
 
     res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -5494,12 +5775,32 @@ tr.loss td:first-child{border-left:3px solid rgba(255,255,255,0.1)}
 .disclaimer{margin-top:40px;padding:16px 20px;background:rgba(255,255,255,0.02);
   border-radius:10px;font-size:11px;color:#64748B;line-height:1.8}
 @media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}}
+.rcard-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.rcard{background:rgba(0,212,255,0.03);border:1px solid rgba(0,212,255,0.1);border-radius:12px;padding:14px}
+.rcard-taken{border-color:rgba(0,200,150,0.35);background:rgba(0,200,150,0.05)}
+.rcard-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.rcard-symbol{font-size:13px}
+.rcard-market{font-size:9px;color:#64748B;text-transform:uppercase;letter-spacing:0.06em;margin-left:4px}
+.rcard-outcome{font-size:11px}
+.rcard-action{font-family:'Space Mono',monospace;font-size:15px;font-weight:700;margin-bottom:6px}
+.rcard-conf{font-size:12px;opacity:0.8}
+.rcard-bar-track{height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-bottom:8px;overflow:hidden}
+.rcard-bar-fill{height:100%;border-radius:2px}
+.rcard-reason{font-size:11px;color:#94A3B8;margin-bottom:10px;min-height:14px}
+.rcard-footer{display:flex;justify-content:space-between;font-size:10px;color:#4a6080;font-family:'Space Mono',monospace}
+.rcard-hash{opacity:0.6}
+.chain-badge{font-size:10px;padding:3px 10px;border-radius:20px;font-family:'Space Mono',monospace;letter-spacing:0.08em;margin-left:8px}
+.chain-ok{background:rgba(0,200,150,0.1);border:1px solid rgba(0,200,150,0.25);color:#00C896}
+.chain-broken{background:rgba(255,68,102,0.1);border:1px solid rgba(255,68,102,0.35);color:#FF4466}
 </style>
 </head>
 <body>
 <div>
   <span class="logo">KRAKN·AI</span>
   <span class="badge">✓ SHADOW BOOK</span>
+  <span class="chain-badge ${chainStatus.intact?'chain-ok':'chain-broken'}">
+    ${chainStatus.intact ? `🔗 CHAIN VERIFIED (${chainStatus.entriesChecked})` : '⚠ CHAIN INTEGRITY ISSUE'}
+  </span>
 </div>
 <div class="sub">Every trade decision, taken or declined — crypto, stocks, and options alike · ${new Date().toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'})} AEST</div>
 
@@ -5531,15 +5832,13 @@ tr.loss td:first-child{border-left:3px solid rgba(255,255,255,0.1)}
 </div>
 
 <h2>Decision Log — Last ${entries.length} Evaluations</h2>
-${entries.length>0?`<table>
-<tr><th>Time</th><th>Market</th><th>Symbol</th><th>Signal</th><th>Reason</th><th>Outcome</th></tr>
-${rows}
-</table>`:'<p style="color:#64748B;font-size:13px">No decisions logged yet — check back once the bot has run a scan cycle.</p>'}
+${entries.length>0?`<div class="rcard-grid">${reasonCards}</div>`:'<p style="color:#64748B;font-size:13px">No decisions logged yet — check back once the bot has run a scan cycle.</p>'}
 
 <div class="disclaimer">
   ℹ️ The Shadow Book is a transparent, append-only record of every trade KRAKN·AI evaluates —
   including opportunities it declined because they didn't clear its confidence threshold.
   It exists to show the reasoning behind what the bot does <i>and</i> doesn't act on, not just its executed trades.
+  Each entry is hash-linked to the one before it — the badge above confirms the chain hasn't been altered.
 </div>
 </body>
 </html>`);
