@@ -860,6 +860,19 @@ async function renderBot() {
       </div>
     </div>
 
+    <div class="card" style="padding:16px;margin-bottom:14px">
+      <div class="bot-status-row">
+        <div>
+          <div class="bot-title" style="font-size:15px">🌙 Day Trade Mode</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:3px">Stocks only — closes every position before market close</div>
+        </div>
+        <div class="toggle ${cfg2.dayTradeMode?'on':''}" onclick="toggleDayTradeMode()">
+          <div class="toggle-knob"></div>
+        </div>
+      </div>
+      ${cfg2.dayTradeMode?`<div style="font-size:11px;color:var(--dim);margin-top:10px">Day trades this week: <b style="color:${(status.dayTradesThisWeek||0)>=3?'var(--red)':'var(--text)'}">${status.dayTradesThisWeek||0}/3</b></div>`:''}
+    </div>
+
     <div class="section-label" style="padding:0 0 0 0">Bot Settings</div>
     <div class="card" style="padding:16px;margin-bottom:14px">
       <div class="field-label">Risk Level</div>
@@ -911,6 +924,17 @@ async function toggleBot() {
     await api('/api/bot/'+(running?'stop':'start'), {method:'POST'});
     botStatus.running = !running;
     showToast(running ? 'Bot paused' : 'Bot started ✓');
+    renderBot();
+  } catch(e) { showToast('Error: '+e.message); }
+}
+
+async function toggleDayTradeMode() {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  const newState = !(botCfg.dayTradeMode);
+  try {
+    await api('/api/bot/config', {method:'POST', body:JSON.stringify({dayTradeMode:newState})});
+    botCfg.dayTradeMode = newState;
+    showToast(newState ? 'Day Trade Mode ON 🌙' : 'Day Trade Mode OFF');
     renderBot();
   } catch(e) { showToast('Error: '+e.message); }
 }
