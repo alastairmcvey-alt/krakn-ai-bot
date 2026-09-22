@@ -454,6 +454,34 @@ async function scanOptionsOpportunities() {
 let alpacaPositions    = {}; // { AAPL: { qty, avgEntryPrice, entryTime } }
 let alpacaPeakPrices   = {}; // { AAPL: peakPrice } for trailing stop
 let alpacaBuyTimes     = {}; // { AAPL: timestamp }
+
+// ─── Day Trade Tracking ─────────────────────────────────────
+// Only relevant to stocks — crypto is completely exempt from PDT
+// regardless of account balance. Tracks genuine same-day buy+sell
+// round trips so Day Trade Mode never pushes the account toward a
+// PDT flag, which matters once real money under $25k is involved
+// even though it's not currently binding on the paper account.
+let dayTradeLog = []; // [{ symbol, date }] — one entry per confirmed same-day round trip
+
+function recordDayTradeIfSameDay(symbol) {
+  const boughtAt = alpacaBuyTimes[symbol];
+  if (!boughtAt) return; // no buy timestamp on record — can't confirm same-day, don't guess
+  const boughtDate = new Date(boughtAt).toDateString();
+  const today       = new Date().toDateString();
+  if (boughtDate === today) {
+    dayTradeLog.push({ symbol, date: today });
+    console.log(`[DAY TRADE] Recorded — ${symbol} bought and sold same day (${today})`);
+  }
+}
+
+// Conservative 7-calendar-day lookback (rather than precisely counting
+// business days) — errs toward caution since this is a safety check,
+// not something that needs to squeeze out the legal maximum.
+function countRecentDayTrades() {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  return dayTradeLog.filter(t => new Date(t.date).getTime() >= cutoff).length;
+}
+
 let alpacaBuyNotifyCache = {}; // cooldown per symbol
 let optionsBuyTimes    = {}; // { AAPL: timestamp } — separate cooldown for options trades
 
@@ -500,6 +528,15 @@ function isMarketOpen() {
   const time    = hours * 60 + minutes;
   // Mon-Fri, 9:30am-4:00pm ET
   return day >= 1 && day <= 5 && time >= 570 && time < 960;
+}
+
+// True in the final N minutes before the 4:00pm ET close — the window
+// Day Trade Mode uses to force-close any open stock positions.
+function isNearMarketClose(windowMinutes = 15) {
+  const now     = new Date();
+  const sydney  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const time    = sydney.getHours() * 60 + sydney.getMinutes();
+  return time >= (960 - windowMinutes) && time < 960;
 }
 
 // Fast stock signal scan — RSI + MACD using Alpaca daily bars
@@ -566,7 +603,7 @@ async function checkStockOpportunities() {
       try {
         const signal = await computeStockSignal(sym);
         const threshold = botConfig.confidenceMin || 65;
-        console.log(`[STOCK CHECK] ${sym}: ${signal.action} ${signal.confidence}% RSI:${signal.rsi} — ${signal.action==='BUY'&&signal.confidence>=threshold?'✅':'skip'}`);
+        console.log(`[STOCK CHECK] ${sym}: ${signal.action} ${signal.confidence}% RSI:${signal.rsi} score:${signal.score ?? '?'} macd:${signal.macd || '?'} — ${signal.action==='BUY'&&signal.confidence>=threshold?'✅':'skip'}`);
         logShadowEntry('stock', sym, signal.action, signal.confidence, `RSI:${signal.rsi}`, signal.action==='BUY'&&signal.confidence>=threshold);
         if (signal.action === 'BUY' && signal.confidence >= threshold) {
           if (!bestStock || signal.confidence > bestScore) {
@@ -824,6 +861,7 @@ async function checkStockPositions() {
             continue;
           }
           const order = await placeAlpacaStockOrder(sym, 'sell', qty);
+          recordDayTradeIfSameDay(sym); // must run before the timestamp below is cleared
           delete alpacaPeakPrices[sym];
           delete alpacaBuyTimes[sym];
           const pnl = (currPrice - entryPrice) * qty;
@@ -960,6 +998,59 @@ let advisorSettings = {
   includeNews:   false, // disabled — news fetching adds Claude calls
   lastRun:       null,
 };
+
+// ─── Day Trade Mode ─────────────────────────────────────────
+// Off by default — toggled the same way as Auto-Sell. When on,
+// force-closes every open stock position in the final minutes
+// before market close, eliminating overnight gap risk entirely.
+// Never touches crypto — there's no equivalent overnight risk to
+// protect against there, and PDT doesn't apply to crypto anyway.
+async function checkEndOfDayStockClose() {
+  if (!botConfig.dayTradeMode) return;
+  if (!ALPACA_KEY || !isMarketOpen() || !isNearMarketClose(15)) return;
+
+  try {
+    const positions = await getAlpacaPositions();
+    if (!positions.length) return;
+
+    for (const pos of positions) {
+      if (pos.asset_class !== 'us_equity') continue;
+      const sym = pos.symbol;
+      const qty = parseFloat(pos.qty);
+
+      // Would closing this right now register as a same-day round trip?
+      const boughtAt    = alpacaBuyTimes[sym];
+      const isSameDayBuy = boughtAt && new Date(boughtAt).toDateString() === new Date().toDateString();
+
+      if (isSameDayBuy && countRecentDayTrades() >= 3) {
+        console.log(`[DAY TRADE MODE] ${sym} would be day-trade #${countRecentDayTrades()+1} in 7 days — holding overnight instead to avoid a PDT flag`);
+        await sendTelegram(
+          `⚠️ <b>Day Trade Mode — held overnight</b>\n\n` +
+          `<b>${sym}</b> was bought today, and closing it now would be your 4th day trade ` +
+          `in the last week. Holding it overnight instead to avoid a Pattern Day Trader flag.\n\n` +
+          `This matters even on paper — the same limit applies once real funds go in.`
+        );
+        continue;
+      }
+
+      try {
+        const order = await placeAlpacaStockOrder(sym, 'sell', qty);
+        recordDayTradeIfSameDay(sym);
+        delete alpacaPeakPrices[sym];
+        delete alpacaBuyTimes[sym];
+        console.log(`[DAY TRADE MODE] ✅ ${sym} force-closed before market close — order ${order.id}`);
+        await sendTelegram(
+          `🌙 <b>Day Trade Mode — position closed</b>\n\n` +
+          `<b>${sym}</b> sold before market close (Day Trade Mode is on).\n` +
+          `Day trades this week: ${countRecentDayTrades()}/3`
+        );
+      } catch(e) {
+        console.error(`[DAY TRADE MODE] Failed to close ${sym}:`, e.message);
+        await sendTelegram(`❌ Day Trade Mode couldn't close ${sym}: ${e.message}`);
+      }
+    }
+  } catch(e) { console.error('[DAY TRADE MODE] Error:', e.message); }
+}
 
 // ─── State ─────────────────────────────────────────────────────
 let priceAlerts           = [];
@@ -1154,6 +1245,7 @@ let botConfig = {
   autoBuyMaxAUD:        200,
   maxTradePct:          20,  // hard cap: no single trade can exceed this % of total portfolio value
   maxTotalExposurePct:  90,  // hard cap: total invested (vs cash) can't exceed this % across both brokers
+  dayTradeMode:         false, // stocks only — force-closes every open stock position before market close each day
   autoBuyMinConfidence: 82,
 
   // ── Notification Settings ─────────────────────────────────
@@ -1347,8 +1439,9 @@ async function sendDailyPortfolioDigest() {
 
     // 4. Build holdings section
     const holdingsLines = holdings.map(h => {
+      const profitAUD = (h.avgBuy && h.qty) ? (h.price - h.avgBuy) * h.qty : null;
       const pnlStr = h.unrealPct !== null
-        ? ` (${h.unrealPct >= 0 ? '🟢 +' : '🔴 '}${h.unrealPct.toFixed(1)}%)`
+        ? ` (${h.unrealPct >= 0 ? '🟢 +' : '🔴 '}${h.unrealPct.toFixed(1)}%${profitAUD !== null ? ` = ${profitAUD >= 0 ? '+' : '-'}$${Math.abs(profitAUD).toFixed(2)}` : ''})`
         : '';
       const heldStr = h.heldHours
         ? ` · held ${h.heldHours < 24 ? h.heldHours.toFixed(0)+'h' : (h.heldHours/24).toFixed(1)+'d'}`
@@ -1433,6 +1526,7 @@ async function sendDailyPortfolioDigest() {
 
       `🤖 <b>Bot Status</b>\n` +
       `${botRunning ? '🟢 Running' : '⏸ Paused'} · ${botConfig.confidenceMin}% threshold · ${botConfig.stopLossPct}% stop\n` +
+      `${botConfig.dayTradeMode ? `🌙 Day Trade Mode: ON — ${countRecentDayTrades()}/3 day trades this week\n` : ''}` +
       `${tradesCount} total trades · ${winRate}% win rate\n\n` +
 
       `💡 Reply <b>Any signals?</b> for crypto · <b>stocks</b> for Alpaca status`
@@ -1526,6 +1620,7 @@ function saveData() {
       signalWeights, tradeOutcomes,
       shadowBook: shadowBook.slice(0, 300),
       lastShadowHash,
+      dayTradeLog,
       botRunning: botState.running,
       savedAt: new Date().toISOString(),
     };
@@ -1585,6 +1680,7 @@ function loadData() {
       if (data.tradeOutcomes)       tradeOutcomes       = data.tradeOutcomes;
       if (data.shadowBook)          shadowBook          = data.shadowBook;
       if (data.lastShadowHash)      lastShadowHash      = data.lastShadowHash;
+      if (data.dayTradeLog)         dayTradeLog         = data.dayTradeLog;
       // Auto-restart bot if it was running before the server restarted
       // Delay 3 minutes — well past Railway health check window (30s)
       // and past vision analysis startup tasks
@@ -6304,7 +6400,7 @@ app.post('/api/bot/config', requireAuth, (req, res) => {
   saveData(); // persist immediately
   res.json({ success:true, data:botConfig });
 });
-app.get('/api/bot/status',  requireAuth, (req, res) => res.json({ success:true, data:botState }));
+app.get('/api/bot/status',  requireAuth, (req, res) => res.json({ success:true, data:{ ...botState, dayTradesThisWeek: countRecentDayTrades() } }));
 app.get('/api/shadowbook',  requireAuth, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 300);
   res.json({ success:true, data: shadowBook.slice(0, limit), total: shadowBook.length });
@@ -6556,7 +6652,7 @@ async function runAutoSellCheck() {
           `Held: ${heldHours.toFixed(0)} hours (limit: ${maxHoldHours}h)\n` +
           `Entry: ${fmtAUDServer(pnl.avgBuyPrice, holding.pair)}\n` +
           `Exit: ${fmtAUDServer(ticker.price, holding.pair)}\n` +
-          `P&L: ${gainPct >= 0 ? '🟢 +' : '🔴 '}${gainPct.toFixed(2)}%\n\n` +
+          `P&L: ${gainPct >= 0 ? '🟢 +' : '🔴 '}${gainPct.toFixed(2)}% = ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)}\n\n` +
           `Freeing capital for new opportunities.`
         );
         await executeSell(holding, ticker, 'max-hold', `Max hold ${maxHoldHours}h reached`, dp);
@@ -7409,7 +7505,8 @@ app.listen(PORT, async () => {
       );
     } catch(e) {}
   }, 15 * 1000); // 15 seconds after startup
-  setInterval(async () => { try { await checkStockPositions();     } catch(e){} }, 5  * 60 * 1000); // 8am Sydney daily portfolio summary
+  setInterval(async () => { try { await checkStockPositions();     } catch(e){} }, 5  * 60 * 1000);
+  setInterval(async () => { try { await checkEndOfDayStockClose(); } catch(e){} }, 5  * 60 * 1000); // Day Trade Mode — only acts if the toggle is on
 
   setInterval(async () => { try { await checkVolumeAnomalies();   } catch(e) { console.error('[VOLUME]', e.message); } }, 15 * 60 * 1000);
   setInterval(async () => { try { await checkSmartMoneySignals(); } catch(e) { console.error('[SMART]', e.message);  } }, 6 * 60 * 60 * 1000); // 6h (was 15min — huge cost saving)
