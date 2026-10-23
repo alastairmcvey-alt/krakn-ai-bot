@@ -542,7 +542,7 @@ function isNearMarketClose(windowMinutes = 15) {
 // Fast stock signal scan — RSI + MACD using Alpaca daily bars
 async function computeStockSignal(symbol) {
   try {
-    const bars = await fetchStockBars(symbol, 1440, 30); // daily bars
+    const bars = await fetchStockBars(symbol, 1440, 90); // daily bars (90 calendar days ≈ 60 trading days — MACD needs 26+ closes)
     if (!bars || bars.length < 14) return { action:'HOLD', confidence:50, rsi:50, symbol };
 
     const closes  = bars.map(c => parseFloat(c[4]));
@@ -558,8 +558,8 @@ async function computeStockSignal(symbol) {
     let score = 0;
     if (rsi < 35)       score += 3;
     else if (rsi < 45)  score += 1;
-    else if (rsi > 65)  score -= 1;
     else if (rsi > 75)  score -= 3;
+    else if (rsi > 65)  score -= 1;
     if (macd.trend === 'BULLISH')    score += 2;
     else if (macd.trend === 'BEARISH') score -= 2;
     if (bb.position === 'OVERSOLD')  score += 2;
