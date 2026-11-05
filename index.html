@@ -863,6 +863,19 @@ async function renderBot() {
     <div class="card" style="padding:16px;margin-bottom:14px">
       <div class="bot-status-row">
         <div>
+          <div class="bot-title" style="font-size:15px">🛒 Auto-Buy</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:3px">${cfg2.autoBuy?'ON — crypto and stocks buy automatically when confident enough':'OFF — you approve every buy in Telegram'}</div>
+        </div>
+        <div class="toggle ${cfg2.autoBuy?'on':''}" onclick="toggleAutoBuy()">
+          <div class="toggle-knob"></div>
+        </div>
+      </div>
+      ${cfg2.autoBuy?`<div style="font-size:11px;color:var(--dim);margin-top:10px">Crypto auto-buys at <b style="color:var(--text)">${cfg2.autoBuyMinConfidence||82}%+</b> (max A$${cfg2.autoBuyMaxAUD||200}) · Stocks (paper) at <b style="color:var(--text)">${cfg2.autoBuyMinConfidenceStock||70}%+</b></div>`:''}
+    </div>
+
+    <div class="card" style="padding:16px;margin-bottom:14px">
+      <div class="bot-status-row">
+        <div>
           <div class="bot-title" style="font-size:15px">🌙 Day Trade Mode</div>
           <div style="font-size:11px;color:var(--dim);margin-top:3px">Stocks only — closes every position before market close</div>
         </div>
@@ -924,6 +937,17 @@ async function toggleBot() {
     await api('/api/bot/'+(running?'stop':'start'), {method:'POST'});
     botStatus.running = !running;
     showToast(running ? 'Bot paused' : 'Bot started ✓');
+    renderBot();
+  } catch(e) { showToast('Error: '+e.message); }
+}
+
+async function toggleAutoBuy() {
+  if (!serverOnline) { showToast('Server offline'); return; }
+  const newState = !(botCfg.autoBuy);
+  try {
+    await api('/api/bot/config', {method:'POST', body:JSON.stringify({autoBuy:newState})});
+    botCfg.autoBuy = newState;
+    showToast(newState ? 'Auto-Buy ON 🛒' : 'Auto-Buy OFF');
     renderBot();
   } catch(e) { showToast('Error: '+e.message); }
 }
