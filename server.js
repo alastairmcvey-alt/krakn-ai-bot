@@ -636,7 +636,7 @@ async function checkStockOpportunities() {
     alpacaBuyNotifyCache[bestStock.symbol] = Date.now();
 
     // Auto-buy or manual prompt
-    if (botConfig.autoBuy && bestStock.confidence >= botConfig.autoBuyMinConfidence) {
+    if (botConfig.autoBuy && bestStock.confidence >= (botConfig.autoBuyMinConfidenceStock || 70)) {
       const tradeValueAUD = (qty * ticker.price) * 1.55; // rough USD→AUD for the exposure check
       const exposureCheck = await checkExposureCap(tradeValueAUD, 'Stock');
       if (!exposureCheck.allowed) {
@@ -1247,6 +1247,7 @@ let botConfig = {
   maxTotalExposurePct:  90,  // hard cap: total invested (vs cash) can't exceed this % across both brokers
   dayTradeMode:         false, // stocks only — force-closes every open stock position before market close each day
   autoBuyMinConfidence: 82,
+  autoBuyMinConfidenceStock: 70, // stocks score lower than crypto (daily-bar engine); paper trading only
 
   // ── Notification Settings ─────────────────────────────────
   // Critical alerts always fire immediately (buy/sell/stop loss/errors)
@@ -3294,7 +3295,7 @@ async function checkBuyOpportunities(marketData, manualTrigger = false) {
           `🟡 Break-even stop activates at: +${botConfig.breakEvenTriggerPct}% (stop moves to entry)\n` +
           `🟢 Trailing stop activates at: +${botConfig.trailingTriggerPct}% (locks in profit)\n\n` +
           `⏱ Min hold: ${botConfig.minHoldMinutes} min\n` +
-          `🔴 To disable auto-buy, go to Bot Settings → Auto-Buy\n` +
+          `🔴 To disable auto-buy, open the Bot tab and switch Auto-Buy off\n` +
           `⏰ ${sydneyTime} AEST`
         );
 
@@ -6458,7 +6459,8 @@ async function runAutoSellCheck() {
       p.replace('AUD','') === sym.replace('XBT','BTC').replace('BTC','XBT')
     );
     if (!pair) continue;
-    holdings.push({ asset, sym, qty: amount, pair });
+    // key = name used for P&L / buy-time / peak tracking (Kraken calls Bitcoin 'XBT', the rest of the bot files it as 'BTC')
+    holdings.push({ asset, sym, key: sym.replace('XBT','BTC'), qty: amount, pair });
   }
 
   if (!holdings.length) { console.log('[AUTO-SELL BOT] No holdings to check'); return; }
@@ -6481,8 +6483,8 @@ async function runAutoSellCheck() {
       // ── Minimum Hold Time Check ───────────────────────────
       // Don't sell within minHoldMinutes of buying — prevents churn on noise
       // EXCEPTION: If we're down >5% we allow stop loss to fire anyway
-      const lastBought  = lastBuyTimes[holding.sym];
-      const pnlEarly    = getUnrealisedPnl(holding.sym, ticker.price, holding.qty);
+      const lastBought  = lastBuyTimes[holding.key];
+      const pnlEarly    = getUnrealisedPnl(holding.key, ticker.price, holding.qty);
       const earlyLossPct = pnlEarly.avgBuyPrice > 0
         ? ((ticker.price - pnlEarly.avgBuyPrice) / pnlEarly.avgBuyPrice) * 100
         : 0;
@@ -6498,7 +6500,7 @@ async function runAutoSellCheck() {
       }
 
       // ── Stop-Loss Check (ATR-powered dynamic stops) ──────────
-      const pnl = getUnrealisedPnl(holding.sym, ticker.price, holding.qty);
+      const pnl = getUnrealisedPnl(holding.key, ticker.price, holding.qty);
       if (botConfig.stopLossEnabled && pnl.avgBuyPrice > 0) {
 
         // Calculate ATR-based dynamic stop for this coin right now
@@ -6524,15 +6526,18 @@ async function runAutoSellCheck() {
         const trailingTrig   = entryConf >= 85
           ? Math.max(botConfig.trailingTriggerPct || 4.0, 6.0)  // high conviction: trail activates at +6%
           : botConfig.trailingTriggerPct || 4.0;                 // normal: trail activates at +4%
-        const trailWidth     = entryConf >= 85
+        let trailWidth       = entryConf >= 85
           ? Math.max(effectiveStopPct, 5.0)   // high conviction: 5% trail minimum
           : effectiveStopPct;                  // normal: ATR-based trail
+        // Bitcoin gets a wider trail (default 5%, editable via botConfig.btcTrailPct) so normal
+        // daily swings don't shake out a big winner. Only widens, never narrows.
+        if (holding.key === 'BTC') trailWidth = Math.max(trailWidth, botConfig.btcTrailPct || 5.0);
 
         // Track peak price for trailing stop
-        if (!stopLossPeaks[holding.sym] || ticker.price > stopLossPeaks[holding.sym]) {
-          stopLossPeaks[holding.sym] = ticker.price;
+        if (!stopLossPeaks[holding.key] || ticker.price > stopLossPeaks[holding.key]) {
+          stopLossPeaks[holding.key] = ticker.price;
         }
-        const peakPrice    = stopLossPeaks[holding.sym];
+        const peakPrice    = stopLossPeaks[holding.key];
         const entryPrice   = pnl.avgBuyPrice;
         const currentPrice = ticker.price;
         const gainFromEntry   = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
@@ -6579,7 +6584,7 @@ async function runAutoSellCheck() {
                 `💵 ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)} profit banked\n\n` +
                 `✅ Break-even stop protected you from giving this back`
               );
-              delete stopLossPeaks[holding.sym];
+              delete stopLossPeaks[holding.key];
               await executeSell(holding, ticker, 'trailing-stop', `Trailing stop: locked in +${profitLocked.toFixed(1)}%`, dp);
               continue;
             } else {
@@ -6604,7 +6609,7 @@ async function runAutoSellCheck() {
                 `✅ Stop moved to entry protected your capital\n` +
                 `💡 You did not lose money on this trade`
               );
-              delete stopLossPeaks[holding.sym];
+              delete stopLossPeaks[holding.key];
               await executeSell(holding, ticker, 'break-even', `Break-even stop — was +${gainFromEntry.toFixed(1)}%, returned to entry`, dp);
               continue;
             } else {
@@ -6625,7 +6630,7 @@ async function runAutoSellCheck() {
                 `Unrealised: ${fmtAUDServer(pnl.unrealisedPnl, holding.pair)}\n\n` +
                 `⏳ Cutting loss to protect remaining capital...`
               );
-              delete stopLossPeaks[holding.sym];
+              delete stopLossPeaks[holding.key];
               await executeSell(holding, ticker, 'stop-loss', `ATR stop: ${dropFromEntry.toFixed(1)}% below entry`, dp);
               continue;
             } else {
@@ -6640,10 +6645,11 @@ async function runAutoSellCheck() {
       // If held too long without hitting TP or SL, exit to free capital
       // Default: 5 days (120 candles on 1H) — configurable
       const maxHoldHours = botConfig.maxHoldHours || 120; // 5 days
-      const heldHours    = lastBuyTimes[holding.sym]
-        ? (Date.now() - lastBuyTimes[holding.sym]) / 3600000
+      const heldHours    = lastBuyTimes[holding.key]
+        ? (Date.now() - lastBuyTimes[holding.key]) / 3600000
         : 0;
-      if (heldHours >= maxHoldHours && pnl.avgBuyPrice > 0) {
+      // Max-hold exit is OFF unless botConfig.maxHoldEnabled is set to true (it force-sold winners at 5 days regardless of market)
+      if (botConfig.maxHoldEnabled === true && heldHours >= maxHoldHours && pnl.avgBuyPrice > 0) {
         const gainPct = ((ticker.price - pnl.avgBuyPrice) / pnl.avgBuyPrice) * 100;
         console.log(`[AUTO-SELL BOT] ${dp} max hold reached (${heldHours.toFixed(0)}h) — exiting at ${gainPct.toFixed(2)}%`);
         await sendTelegram(
@@ -6746,7 +6752,7 @@ async function executeSell(holding, ticker, source, reason, dp, signal = null) {
 
   const sellVolume   = actualQty.toFixed(8);
   const sellValueAUD = (actualQty * ticker.price).toFixed(2);
-  const pnl     = getUnrealisedPnl(holding.sym, ticker.price, actualQty);
+  const pnl     = getUnrealisedPnl(holding.key || holding.sym, ticker.price, actualQty);
   const pnlStr       = pnl.avgBuyPrice > 0
     ? `\nP&L on this trade: ${pnl.unrealisedPnl >= 0 ? '🟢 +' : '🔴 '}${fmtAUDServer(pnl.unrealisedPnl)} (${pnl.pnlPct.toFixed(1)}%)`
     : '';
@@ -6783,7 +6789,7 @@ async function executeSell(holding, ticker, source, reason, dp, signal = null) {
     }
 
     // Record in P&L tracker using actual quantity sold
-    recordTrade(holding.pair, holding.sym, 'sell', sellVolume, ticker.price, source);
+    recordTrade(holding.pair, holding.key || holding.sym, 'sell', sellVolume, ticker.price, source);
 
     botState.lastSell = {
       pair: holding.pair, sym: holding.sym,
@@ -6795,7 +6801,7 @@ async function executeSell(holding, ticker, source, reason, dp, signal = null) {
     botState.sellsCount++;
 
     const sydneyTime  = new Date().toLocaleString('en-AU', { timeZone:'Australia/Sydney', dateStyle:'short', timeStyle:'short' });
-    const realisedPnl = pnlByAsset[holding.sym]?.realisedPnl || 0;
+    const realisedPnl = pnlByAsset[holding.key || holding.sym]?.realisedPnl || 0;
 
     // This trade P&L — calculated before recordTrade updates the asset
     const thisTradeAUD = pnl.unrealisedPnl;
